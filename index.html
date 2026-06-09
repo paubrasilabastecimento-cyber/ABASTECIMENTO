@@ -101,6 +101,16 @@
       setFbStatus(err === 0 ? 'online' : 'erro');
     },
 
+    // Limpa todos os registros do Firebase
+    limparTodos: async function() {
+      try {
+        await set(ref(db, 'abastecimentos'), null);
+        fbLog('🗑️ Todos os registros removidos do Firebase.', 'ok');
+      } catch(e) {
+        fbLog('❌ Erro ao limpar: ' + e.message, 'err');
+      }
+    },
+
     // Escuta mudanças em tempo real e atualiza os registros locais
     escutar: function() {
       const r = ref(db, 'abastecimentos');
@@ -111,9 +121,21 @@
           registros = Object.values(data).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
           localStorage.setItem('abastecimentos', JSON.stringify(registros));
           atualizarBadge();
+          // Atualiza a aba ativa automaticamente
+          const paginaAtiva = document.querySelector('.page.active');
+          if(paginaAtiva) {
+            const id = paginaAtiva.id;
+            if(id==='page-registros') renderRegistros();
+            if(id==='page-dashboard') renderDashboard();
+            if(id==='page-tanque') renderTanque();
+          }
           fbLog('🔄 Dados sincronizados: ' + registros.length + ' registros.', 'ok');
           setFbStatus('online');
         } else {
+          registros = [];
+          atualizarBadge();
+          const paginaAtiva = document.querySelector('.page.active');
+          if(paginaAtiva && paginaAtiva.id==='page-registros') renderRegistros();
           fbLog('ℹ️ Nenhum dado no Firebase ainda.', 'info');
         }
       }, (error) => {
@@ -445,7 +467,14 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
     <span></span><span></span><span></span>
   </button>
   <div class="header-title">Frota <span>Abastecimento</span></div>
+  <div id="sync-indicator" style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+    <div id="sync-dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted);animation:pulse 1.2s infinite"></div>
+    <span id="sync-txt">Sincronizando...</span>
+  </div>
 </header>
+<style>
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
 
 <div class="app-body">
 
@@ -846,7 +875,7 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
 // STATE
 // ══════════════════════════════════════════════
 const SENHA_CORRETA = '1234'; // ← altere aqui
-let registros = JSON.parse(localStorage.getItem('abastecimentos') || '[]');
+let registros = []; // Dados vêm do Firebase em tempo real
 let tanqueCfg = JSON.parse(localStorage.getItem('tanqueCfg') || '{"capacidade":15000,"atual":15000}');
 let combustivelSelecionado = '';
 let horaInicio = null, horaFim = null;
@@ -891,7 +920,11 @@ function verificarSenha() {
     document.getElementById('senha-overlay').style.display = 'none';
     const destino = document.getElementById('senha-overlay').dataset.destino || 'registros';
     const btn = document.getElementById('senha-overlay')._btn;
-    _activateTab(destino, btn);
+    if(destino === '__limpar__') {
+      _executarLimpar();
+    } else {
+      _activateTab(destino, btn);
+    }
   } else {
     document.getElementById('senha-errou').style.display = 'block';
     document.getElementById('senha-input').value = '';
@@ -1091,11 +1124,24 @@ function renderRegistros() {
   `).join('');
 }
 function limparRegistros() {
-  if(!confirm('Apagar todos os registros? Essa ação não pode ser desfeita.')) return;
+  if(!senhaDesbloqueada) {
+    document.getElementById('senha-overlay').style.display = 'flex';
+    document.getElementById('senha-input').value = '';
+    document.getElementById('senha-errou').style.display = 'none';
+    document.getElementById('senha-overlay').dataset.destino = '__limpar__';
+    document.getElementById('senha-input').focus();
+    return;
+  }
+  _executarLimpar();
+}
+function _executarLimpar() {
+  if(!confirm('Apagar todos os registros do Firebase? Essa ação não pode ser desfeita.')) return;
   registros=[];
   localStorage.removeItem('abastecimentos');
   atualizarBadge();
   renderRegistros();
+  // Limpar no Firebase também
+  if(window._fb && window._fb.limparTodos) window._fb.limparTodos();
 }
 
 // ══════════════════════════════════════════════
@@ -1359,6 +1405,25 @@ function setFbStatus(s){
   if(s==='online'){ dot.className='fb-dot online'; txt.textContent='Conectado ao Realtime Database ✅'; }
   else if(s==='erro'){ dot.className='fb-dot erro'; txt.textContent='Erro de conexão ❌'; }
   else { dot.className='fb-dot'; txt.textContent='Verificando...'; }
+
+  // Atualizar indicador no header
+  const syncDot = document.getElementById('sync-dot');
+  const syncTxt = document.getElementById('sync-txt');
+  if(syncDot && syncTxt) {
+    if(s==='online'){
+      syncDot.style.background='var(--green)';
+      syncDot.style.animation='none';
+      syncTxt.textContent='Sincronizado ✓';
+    } else if(s==='erro') {
+      syncDot.style.background='var(--red)';
+      syncDot.style.animation='none';
+      syncTxt.textContent='Sem conexão';
+    } else {
+      syncDot.style.background='var(--muted)';
+      syncDot.style.animation='pulse 1.2s infinite';
+      syncTxt.textContent='Sincronizando...';
+    }
+  }
 }
 
 function carregarConfigFirebase(){
@@ -1561,74 +1626,7 @@ function closeSidebar() {
   document.getElementById('hamburger').classList.remove('open');
 }
 
-// ══════════════════════════════════════════════
-// DADOS DE EXEMPLO (seed)
-// ══════════════════════════════════════════════
-(function seedDados(){
-  const stored = JSON.parse(localStorage.getItem('abastecimentos')||'[]');
-  if(stored.length > 0) return; // já tem dados
-
-  const placas = ['QSK7D92','OXO0532','OXO0542','OXO0552','OXO0782','SLB4A26','NPR2601','SLB4A56','TOZ8B20','TOZ8B50'];
-  const motoristas = ['Carlos Silva','Marcos Pereira','João Souza','Pedro Lima','Rafael Santos','Eduardo Costa'];
-  const responsaveis = ['Thiago Alves','Lucas Ferreira'];
-
-  function rnd(min,max){ return Math.random()*(max-min)+min; }
-  function rndInt(min,max){ return Math.floor(rnd(min,max)); }
-  function padZ(n){ return String(n).padStart(2,'0'); }
-
-  const agora = Date.now();
-  const seeds = [];
-
-  // 35 registros espalhados nos últimos 45 dias
-  for(let i=0; i<35; i++){
-    const diasAtras = rndInt(0, 45);
-    const ts = agora - diasAtras*86400000 - rndInt(0,86400000);
-    const dt = new Date(ts);
-    const data = padZ(dt.getDate())+'/'+padZ(dt.getMonth()+1)+'/'+dt.getFullYear();
-    const hI = padZ(rndInt(6,11))+':'+padZ(rndInt(0,59));
-    const duracaoMin = rndInt(12, 45);
-    const hFParts = hI.split(':');
-    const fimMin = parseInt(hFParts[1])+duracaoMin;
-    const hF = padZ(parseInt(hFParts[0])+Math.floor(fimMin/60))+':'+padZ(fimMin%60);
-    const dur = duracaoMin>=60?`${Math.floor(duracaoMin/60)}h ${duracaoMin%60}min`:`${duracaoMin}min`;
-
-    const placa = placas[rndInt(0, placas.length)];
-    const isTruck = placa.startsWith('OXO')||placa.startsWith('TOZ')||placa.startsWith('QSK');
-    const litragem = isTruck ? rnd(80, 200) : rnd(40, 90);
-    const combustivel = Math.random()<0.88 ? 'DIESEL' : 'ARLA';
-    const km = 80000 + rndInt(0, 120000);
-
-    seeds.push({
-      id: ts - i,
-      placa,
-      km,
-      litragem: parseFloat(litragem.toFixed(1)),
-      combustivel,
-      motorista: motoristas[rndInt(0, motoristas.length)],
-      responsavel: responsaveis[rndInt(0, responsaveis.length)],
-      horaInicio: hI, horaFim: hF,
-      duracao: dur, duracaoMin,
-      foto: '',
-      horario: dt.toLocaleString('pt-BR'),
-      data,
-      timestamp: ts
-    });
-  }
-
-  seeds.sort((a,b)=>b.timestamp-a.timestamp);
-  localStorage.setItem('abastecimentos', JSON.stringify(seeds));
-  registros = seeds;
-  atualizarBadge();
-
-  // Tanque com nível médio
-  if(!localStorage.getItem('tanqueCfg')||JSON.parse(localStorage.getItem('tanqueCfg')).capacidade===15000){
-    const totalDiesel = seeds.filter(r=>r.combustivel==='DIESEL').reduce((s,r)=>s+r.litragem,0);
-    tanqueCfg = {capacidade:15000, atual: Math.max(2000, 15000-totalDiesel)};
-    localStorage.setItem('tanqueCfg', JSON.stringify(tanqueCfg));
-    document.getElementById('tank-capacidade').value = tanqueCfg.capacidade;
-    document.getElementById('tank-atual').value = parseFloat(tanqueCfg.atual.toFixed(0));
-  }
-})();
+// Seed removido — dados vêm exclusivamente do Firebase em tempo real
 
 atualizarBadge();
 // Preenche config do tanque nos inputs ao carregar
