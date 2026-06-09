@@ -2,7 +2,9 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Frota Abastecimento</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
@@ -404,11 +406,22 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
 .fb-log-line.err{color:var(--red)}
 .fb-log-line.info{color:var(--blue)}
 
-@media(max-width:480px){
-  .form-row{grid-template-columns:1fr}
-  .dash-2col{grid-template-columns:1fr}
-  .dash-grid{grid-template-columns:repeat(2,1fr)}
-}
+/* iOS Safari: fix para touch em botões e selects */
+button, select, input { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+* { -webkit-tap-highlight-color: transparent; }
+
+/* Fix cursor pointer em elementos clicáveis no iOS */
+.nav-btn, .combo-btn, .btn-submit, .btn-sec, .hora-btn, .exp-card { cursor: pointer; }
+
+/* Fix input file no iOS */
+input[type="file"] { -webkit-appearance: none; }
+
+/* Fix select no iOS */
+select { -webkit-appearance: none; appearance: none; }
+
+/* Prevent iOS bounce que pode interferir no scroll */
+body { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+
 
 /* TOGGLE SWITCH */
 .toggle-wrap{width:42px;height:24px;cursor:pointer;flex-shrink:0}
@@ -562,7 +575,7 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
     <!-- Foto -->
     <div class="field full">
       <label>Foto da Bomba <span class="req">*</span></label>
-      <input type="file" id="af-foto" accept="image/*" capture="environment" onchange="previewFoto(this)">
+      <input type="file" id="af-foto" accept="image/*" onchange="previewFoto(this)">
       <div class="foto-preview" id="foto-preview"><img id="foto-img" src="" alt="Preview"></div>
     </div>
 
@@ -589,7 +602,7 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
     <div class="senha-icon">🔒</div>
     <div class="senha-title">Área Protegida</div>
     <div class="senha-sub">Digite a senha para continuar</div>
-    <input type="password" class="senha-input" id="senha-input" placeholder="••••••" maxlength="10" onkeydown="if(event.key==='Enter')verificarSenha()">
+    <input type="password" class="senha-input" id="senha-input" placeholder="••••••" maxlength="10" onkeyup="if(event.key==='Enter'||event.keyCode===13)verificarSenha()" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false">
     <div class="senha-errou" id="senha-errou">❌ Senha incorreta. Tente novamente.</div>
     <button class="btn-submit" onclick="verificarSenha()">🔓 Entrar</button>
   </div>
@@ -937,7 +950,10 @@ function verificarSenha() {
 // ══════════════════════════════════════════════
 function marcarHora(tipo) {
   const agora = new Date();
-  const hhmm = agora.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  // iOS Safari: toLocaleTimeString pode retornar formato inesperado, usar manual
+  const hh = String(agora.getHours()).padStart(2,'0');
+  const mm = String(agora.getMinutes()).padStart(2,'0');
+  const hhmm = hh + ':' + mm;
   if(tipo==='inicio'){
     horaInicio = agora;
     document.getElementById('val-inicio').textContent = hhmm;
@@ -981,14 +997,27 @@ function selectCombustivel(tipo) {
   document.getElementById('btn-arla').className='combo-btn'+(tipo==='ARLA'?' selected-arla':'');
 }
 function previewFoto(input) {
-  if(input.files&&input.files[0]){
-    const r = new FileReader();
-    r.onload = e=>{
-      document.getElementById('foto-img').src = e.target.result;
-      document.getElementById('foto-preview').style.display = 'block';
-    };
-    r.readAsDataURL(input.files[0]);
+  // iOS Safari: verificar se há arquivo
+  if (!input.files || !input.files[0]) return;
+  const file = input.files[0];
+  // iOS às vezes não respeita accept="image/*" — verificar manualmente
+  if (!file.type.startsWith('image/') && file.type !== '') {
+    showToast('⚠️ Selecione uma imagem válida', true);
+    input.value = '';
+    return;
   }
+  const r = new FileReader();
+  r.onload = function(e) {
+    const src = e.target.result;
+    const img = document.getElementById('foto-img');
+    const preview = document.getElementById('foto-preview');
+    img.src = src;
+    preview.style.display = 'block';
+  };
+  r.onerror = function() {
+    showToast('⚠️ Erro ao carregar imagem', true);
+  };
+  r.readAsDataURL(file);
 }
 function getPlaca() {
   const v = document.getElementById('af-placa').value;
@@ -1002,8 +1031,13 @@ function salvarRegistro() {
   const combustivel = combustivelSelecionado;
   const motorista = document.getElementById('af-motorista').value.trim();
   const responsavel = document.getElementById('af-responsavel').value.trim();
-  const fotoSrc   = document.getElementById('foto-img').src || '';
-  const temFoto   = fotoSrc && fotoSrc !== window.location.href && fotoSrc.startsWith('data:');
+
+  // iOS Safari: verificar foto pelo FileReader result no img.src
+  const fotoImg = document.getElementById('foto-img');
+  const fotoSrc = fotoImg ? fotoImg.src : '';
+  // iOS às vezes retorna data: ou blob: URLs
+  const temFoto = fotoSrc && fotoSrc.length > 50 &&
+    (fotoSrc.startsWith('data:image') || fotoSrc.startsWith('blob:'));
 
   if(!placa||!km||!litragem||!combustivel||!motorista||!responsavel){
     showToast('⚠️ Preencha todos os campos obrigatórios',true); return;
@@ -1015,9 +1049,28 @@ function salvarRegistro() {
     showToast('⚠️ A foto da bomba é obrigatória!',true); return;
   }
 
-  const hI  = horaInicio.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-  const hF  = horaFim.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-  const ms  = horaFim-horaInicio;
+  // iOS Safe: usar funções de data compatíveis
+  function formatHHMM(d) {
+    const h = String(d.getHours()).padStart(2,'0');
+    const m = String(d.getMinutes()).padStart(2,'0');
+    return h + ':' + m;
+  }
+  function formatDataBR(d) {
+    const dia = String(d.getDate()).padStart(2,'0');
+    const mes = String(d.getMonth()+1).padStart(2,'0');
+    const ano = d.getFullYear();
+    return dia+'/'+mes+'/'+ano;
+  }
+  function formatDateTimeBR(d) {
+    const h = String(d.getHours()).padStart(2,'0');
+    const m = String(d.getMinutes()).padStart(2,'0');
+    const s = String(d.getSeconds()).padStart(2,'0');
+    return formatDataBR(d)+' '+h+':'+m+':'+s;
+  }
+
+  const hI  = formatHHMM(horaInicio);
+  const hF  = formatHHMM(horaFim);
+  const ms  = horaFim - horaInicio;
   const min = Math.floor(ms/60000), h=Math.floor(min/60), m=min%60;
   const dur = h>0?`${h}h ${m}min`:`${min}min`;
   const duracaoMin = min;
@@ -1028,16 +1081,16 @@ function salvarRegistro() {
     placa, km: parseFloat(km), litragem: parseFloat(litragem),
     combustivel, motorista, responsavel,
     horaInicio: hI, horaFim: hF, duracao: dur, duracaoMin,
-    foto: fotoSrc, // base64 salvo local
-    horario: agora.toLocaleString('pt-BR'),
-    data: agora.toLocaleDateString('pt-BR'),
+    foto: fotoSrc,
+    horario: formatDateTimeBR(agora),
+    data: formatDataBR(agora),
     timestamp: agora.getTime()
   };
 
   registros.unshift(reg);
   localStorage.setItem('abastecimentos', JSON.stringify(registros));
 
-  // Sync Firebase: tenta subir foto para Storage e salvar URL
+  // Sync Firebase
   fbSalvarRegistro(reg);
 
   // Descontar do tanque
@@ -1056,9 +1109,19 @@ function resetForm() {
   document.getElementById('af-placa').selectedIndex=0;
   document.getElementById('af-placa-outro').style.display='none';
   ['af-km','af-litragem','af-motorista','af-responsavel'].forEach(id=>document.getElementById(id).value='');
-  document.getElementById('af-foto').value='';
+  // iOS Safari: limpar input file corretamente
+  try {
+    document.getElementById('af-foto').value='';
+  } catch(e) {
+    // iOS antigo: substituir o elemento
+    const old = document.getElementById('af-foto');
+    const novo = old.cloneNode(true);
+    novo.value = '';
+    novo.addEventListener('change', function(){ previewFoto(this); });
+    old.parentNode.replaceChild(novo, old);
+  }
   document.getElementById('foto-preview').style.display='none';
-  document.getElementById('foto-img').src='';
+  document.getElementById('foto-img').removeAttribute('src');
   combustivelSelecionado='';
   document.getElementById('btn-diesel').className='combo-btn';
   document.getElementById('btn-arla').className='combo-btn';
@@ -1589,12 +1652,29 @@ function exportarCSV(tipo){
 
 function downloadCSVAtual(){
   if(!_csvAtual) return;
-  const blob = new Blob([_csvAtual],{type:'text/csv;charset=utf-8;'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = _csvNome;
-  a.click();
-  showToast('📥 Download iniciado!');
+  // iOS Safari: createObjectURL + click em <a> pode não funcionar
+  // Usar tentativa com fallback para abrir em nova aba
+  try {
+    const blob = new Blob([_csvAtual],{type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = _csvNome;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
+    showToast('📥 Download iniciado!');
+  } catch(e) {
+    // Fallback iOS: abrir como data URI em nova aba
+    try {
+      const dataUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(_csvAtual);
+      window.open(dataUri, '_blank');
+      showToast('📥 Aberto em nova aba — salve o arquivo');
+    } catch(e2) {
+      showToast('⚠️ Erro ao baixar no iOS. Tente compartilhar.', true);
+    }
+  }
 }
 
 // Popular select de placas na aba exportar
@@ -1632,6 +1712,55 @@ atualizarBadge();
 // Preenche config do tanque nos inputs ao carregar
 document.getElementById('tank-capacidade').value = tanqueCfg.capacidade||'';
 document.getElementById('tank-atual').value = tanqueCfg.atual||'';
+
+// ══════════════════════════════════════════════
+// iOS SAFARI FIXES
+// ══════════════════════════════════════════════
+(function() {
+  // Fix 1: iOS Safari precisa de touchstart em elementos clicáveis para ativar :hover e click corretamente
+  // Adiciona listener vazio para "ativar" os elementos
+  document.addEventListener('touchstart', function(){}, {passive: true});
+
+  // Fix 2: Detectar iOS e ajustar comportamento do input file
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  if (isIOS) {
+    // No iOS, o evento change do file input só dispara quando o usuário confirma
+    // Garantir que o listener está correto
+    const fotoInput = document.getElementById('af-foto');
+    if (fotoInput) {
+      fotoInput.addEventListener('change', function() {
+        previewFoto(this);
+      });
+    }
+
+    // Fix 3: Senha input no iOS — usar touchend para garantir foco
+    const senhaInput = document.getElementById('senha-input');
+    if (senhaInput) {
+      senhaInput.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        this.focus();
+      });
+    }
+
+    // Fix 4: Botão registrar no iOS — adicionar touchend além de onclick
+    const btnSubmit = document.querySelector('.btn-submit');
+    if (btnSubmit) {
+      btnSubmit.addEventListener('touchend', function(e) {
+        // Deixa o onclick padrão funcionar; o touchend é só para garantir responsividade visual
+        this.style.transform = 'scale(0.98)';
+        setTimeout(() => { this.style.transform = ''; }, 150);
+      });
+    }
+
+    // Fix 5: Prevenir zoom duplo-toque em inputs numéricos
+    document.querySelectorAll('input[type="number"]').forEach(function(el) {
+      el.style.fontSize = '16px'; // iOS não faz zoom em inputs com font-size >= 16px
+    });
+    document.querySelectorAll('input[type="text"], input[type="password"], select').forEach(function(el) {
+      el.style.fontSize = '16px';
+    });
+  }
+})();
 </script>
 </body>
 </html>
