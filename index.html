@@ -6,6 +6,134 @@
 <title>Frota Abastecimento</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue, off, push, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBLjKJ-Lfp692yBF1uHIgtPfcGoUoBwvJ0",
+    authDomain: "abastecimento-78ae9.firebaseapp.com",
+    databaseURL: "https://abastecimento-78ae9-default-rtdb.firebaseio.com",
+    projectId: "abastecimento-78ae9",
+    storageBucket: "abastecimento-78ae9.firebasestorage.app",
+    messagingSenderId: "527386679510",
+    appId: "1:527386679510:web:eb890096aacc0aed079177"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+
+  // ── Expõe funções para o código global ──────────────────────────
+  window._fb = {
+
+    // Salva um registro no caminho abastecimentos/<id>
+    salvar: async function(reg) {
+      try {
+        const regSemFoto = {...reg, foto: ''}; // não sobe base64 no Realtime DB
+        await set(ref(db, 'abastecimentos/' + reg.id), regSemFoto);
+        fbLog('☁️ ' + reg.placa + ' ' + reg.data + ' salvo no Firebase.', 'ok');
+        setFbStatus('online');
+        return true;
+      } catch(e) {
+        fbLog('❌ Erro ao salvar: ' + e.message, 'err');
+        setFbStatus('erro');
+        return false;
+      }
+    },
+
+    // Envia todos os registros locais para o Firebase
+    enviarTodos: async function(lista) {
+      fbLog('Enviando ' + lista.length + ' registros...', 'info');
+      const bar = document.getElementById('fb-sync-bar');
+      const prog = document.getElementById('fb-sync-progress');
+      const lbl  = document.getElementById('fb-sync-label');
+      bar.style.display = 'block'; prog.style.width = '0%';
+      let ok = 0, err = 0;
+      for (let i = 0; i < lista.length; i++) {
+        const r = lista[i];
+        try {
+          await set(ref(db, 'abastecimentos/' + r.id), {...r, foto: ''});
+          ok++;
+        } catch { err++; }
+        const pct = Math.round((i+1)/lista.length*100);
+        prog.style.width = pct + '%';
+        lbl.textContent = 'Enviando ' + (i+1) + '/' + lista.length + '...';
+      }
+      bar.style.display = 'none';
+      fbLog('Concluído: ' + ok + ' enviados, ' + err + ' erros.', err > 0 ? 'err' : 'ok');
+      setFbStatus(err === 0 ? 'online' : 'erro');
+    },
+
+    // Escuta mudanças em tempo real e atualiza os registros locais
+    escutar: function() {
+      const r = ref(db, 'abastecimentos');
+      fbLog('🔴 Escutando mudanças em tempo real...', 'info');
+      onValue(r, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          registros = Object.values(data).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
+          localStorage.setItem('abastecimentos', JSON.stringify(registros));
+          atualizarBadge();
+          fbLog('🔄 Dados sincronizados: ' + registros.length + ' registros.', 'ok');
+          setFbStatus('online');
+        } else {
+          fbLog('ℹ️ Nenhum dado no Firebase ainda.', 'info');
+        }
+      }, (error) => {
+        fbLog('❌ Erro no listener: ' + error.message, 'err');
+        setFbStatus('erro');
+      });
+    },
+
+    // Testa conexão tentando ler a raiz
+    testar: async function() {
+      fbLog('Testando conexão...', 'info');
+      setFbStatus('...');
+      try {
+        const r = ref(db, 'abastecimentos');
+        await new Promise((resolve, reject) => {
+          const unsub = onValue(r, (snap) => {
+            off(r, 'value', unsub);
+            resolve(snap);
+          }, reject, { onlyOnce: true });
+        });
+        fbLog('✅ Conexão bem-sucedida!', 'ok');
+        setFbStatus('online');
+      } catch(e) {
+        fbLog('❌ Falha: ' + e.message, 'err');
+        setFbStatus('erro');
+      }
+    },
+
+    // Importa dados do Firebase para local
+    importar: async function() {
+      fbLog('Importando dados do Firebase...', 'info');
+      try {
+        const r = ref(db, 'abastecimentos');
+        const snap = await new Promise((resolve, reject) => {
+          onValue(r, resolve, reject, { onlyOnce: true });
+        });
+        const data = snap.val();
+        if (!data) { fbLog('ℹ️ Nenhum dado encontrado no Firebase.', 'info'); return; }
+        registros = Object.values(data).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
+        localStorage.setItem('abastecimentos', JSON.stringify(registros));
+        atualizarBadge();
+        fbLog('✅ ' + registros.length + ' registros importados.', 'ok');
+        showToast('📥 ' + registros.length + ' registros importados!');
+      } catch(e) {
+        fbLog('❌ Erro: ' + e.message, 'err');
+      }
+    }
+  };
+
+  // Inicia escuta em tempo real assim que a página carrega
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      if (window._fb) window._fb.escutar();
+    }, 500);
+  });
+</script>
 <style>
 :root{
   --fuel:#f59e0b;--fuel-dark:#d97706;--bg:#0f1117;--surface:#1a1d27;
@@ -512,39 +640,24 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
 
 <!-- ════════════ ABA: FIREBASE ════════════ -->
 <div id="page-firebase" class="page">
-  <div class="sec-title">🔥 Firebase Firestore</div>
+  <div class="sec-title">🔥 Firebase Realtime Database</div>
 
-  <!-- Status + sync automático -->
+  <!-- Status -->
   <div class="fb-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
       <div class="fb-status" style="margin:0">
         <div class="fb-dot" id="fb-dot"></div>
-        <span class="fb-txt" id="fb-status-txt">Não configurado</span>
+        <span class="fb-txt" id="fb-status-txt">Conectando...</span>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;text-transform:none;letter-spacing:0;font-size:13px;font-weight:600;color:var(--text)">
-        <div class="toggle-wrap" onclick="toggleAutoSync()">
-          <div class="toggle-track" id="toggle-track"></div>
-        </div>
-        Sync automático
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--green);text-transform:none;letter-spacing:0">
+        🔴 Escuta em tempo real ativa
       </label>
     </div>
-    <div class="form-grid">
-      <div class="field">
-        <label>API Key</label>
-        <input type="text" id="fb-apikey" placeholder="AIzaSy...">
-      </div>
-      <div class="field">
-        <label>Project ID</label>
-        <input type="text" id="fb-projectid" placeholder="meu-projeto-12345">
-      </div>
-      <div class="field">
-        <label>Collection (Firestore)</label>
-        <input type="text" id="fb-collection" placeholder="abastecimentos">
-      </div>
-      <div class="field full" style="flex-direction:row;gap:10px;flex-wrap:wrap">
-        <button class="btn-submit" style="flex:1;margin-top:0" onclick="testarConexaoFirebase()">🔌 Testar Conexão</button>
-        <button class="btn-sec" style="flex:1" onclick="salvarConfigFirebase()">💾 Salvar Config</button>
-      </div>
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:13px;color:var(--muted);line-height:1.7">
+      <strong style="color:var(--fuel)">Projeto:</strong> abastecimento-78ae9<br>
+      <strong style="color:var(--fuel)">Banco:</strong> Realtime Database<br>
+      <strong style="color:var(--fuel)">Nó:</strong> /abastecimentos<br>
+      <strong style="color:var(--fuel)">Sync:</strong> Automático — cada registro vai direto para o Firebase ao salvar
     </div>
   </div>
 
@@ -555,6 +668,9 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
       <button class="btn-submit" style="margin-top:0;font-size:14px" onclick="enviarParaFirebase()">📤 Enviar Tudo</button>
       <button class="btn-sec" onclick="importarDoFirebase()">📥 Importar do Firebase</button>
     </div>
+    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:14px">
+      <button class="btn-sec" onclick="testarConexaoFirebase()">🔌 Testar Conexão</button>
+    </div>
     <div id="fb-sync-bar" style="display:none;margin-bottom:10px">
       <div style="font-size:11px;color:var(--muted);margin-bottom:4px" id="fb-sync-label">Enviando...</div>
       <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
@@ -563,20 +679,20 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
     </div>
     <div class="fb-label">Log de Atividade</div>
     <div class="fb-log" id="fb-log">
-      <div class="fb-log-line info">Aguardando configuração...</div>
+      <div class="fb-log-line info">Inicializando Firebase SDK...</div>
     </div>
   </div>
 
-  <!-- Instruções -->
+  <!-- Info -->
   <div class="fb-card">
-    <div class="fb-label">Como configurar</div>
+    <div class="fb-label">Como funciona</div>
     <div style="font-size:13px;color:var(--muted);line-height:1.8">
-      1. Acesse <strong style="color:var(--fuel)">console.firebase.google.com</strong><br>
-      2. Crie um projeto → habilite o <strong style="color:var(--text)">Firestore Database</strong><br>
-      3. Em <strong style="color:var(--text)">Configurações do Projeto → Geral</strong>, copie a <strong style="color:var(--text)">API Key</strong> e o <strong style="color:var(--text)">Project ID</strong><br>
-      4. Em Firestore → Regras, permita leitura/escrita enquanto desenvolve:<br>
-      <code style="background:var(--surface2);border-radius:5px;padding:6px 10px;display:block;margin:6px 0;font-size:11px;color:var(--cyan)">allow read, write: if true;</code>
-      5. Com <strong style="color:var(--fuel)">Sync automático</strong> ativado, cada novo registro é enviado em tempo real.
+      ✅ <strong style="color:var(--text)">Sync automático:</strong> cada abastecimento salvo é enviado instantaneamente para o Firebase.<br>
+      🔄 <strong style="color:var(--text)">Escuta em tempo real:</strong> se outro dispositivo registrar algo, esta tela atualiza automaticamente.<br>
+      📤 <strong style="color:var(--text)">Enviar Tudo:</strong> sincroniza todos os registros locais para o Firebase.<br>
+      📥 <strong style="color:var(--text)">Importar:</strong> baixa todos os registros do Firebase para este dispositivo.<br>
+      <br>
+      ⚠️ <strong style="color:var(--fuel)">Atenção:</strong> fotos não são salvas no Realtime Database (somente dados de texto). Para salvar fotos, habilite o Firebase Storage.
     </div>
   </div>
 </div>
@@ -696,7 +812,6 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
 const SENHA_CORRETA = '1234'; // ← altere aqui
 let registros = JSON.parse(localStorage.getItem('abastecimentos') || '[]');
 let tanqueCfg = JSON.parse(localStorage.getItem('tanqueCfg') || '{"capacidade":15000,"atual":15000}');
-let fbConfig  = JSON.parse(localStorage.getItem('fbConfig') || '{}');
 let combustivelSelecionado = '';
 let horaInicio = null, horaFim = null;
 let senhaDesbloqueada = false;
@@ -1185,172 +1300,61 @@ function renderTanque() {
 }
 
 // ══════════════════════════════════════════════
-// FIREBASE — auto-sync
+// FIREBASE — Realtime Database (SDK v10)
 // ══════════════════════════════════════════════
-let autoSync = JSON.parse(localStorage.getItem('fbAutoSync')||'false');
 
-function fbLog(msg,tipo='info'){
-  const log=document.getElementById('fb-log');
-  const line=document.createElement('div');
-  line.className='fb-log-line '+tipo;
-  line.textContent='['+new Date().toLocaleTimeString('pt-BR')+'] '+msg;
-  log.insertBefore(line,log.firstChild);
-  // Manter no máximo 50 linhas
-  while(log.children.length>50) log.removeChild(log.lastChild);
-}
-
-function carregarConfigFirebase(){
-  if(fbConfig.apikey)    document.getElementById('fb-apikey').value    = fbConfig.apikey;
-  if(fbConfig.projectid) document.getElementById('fb-projectid').value = fbConfig.projectid;
-  if(fbConfig.collection)document.getElementById('fb-collection').value= fbConfig.collection||'abastecimentos';
-  // Remover campo dburl antigo se existir
-  const el = document.getElementById('fb-dburl');
-  if(el) el.value = fbConfig.dburl||'';
-  // Atualizar toggle
-  const track = document.getElementById('toggle-track');
-  if(track) track.className = 'toggle-track'+(autoSync?' on':'');
-}
-
-function toggleAutoSync(){
-  autoSync = !autoSync;
-  localStorage.setItem('fbAutoSync', JSON.stringify(autoSync));
-  const track = document.getElementById('toggle-track');
-  track.className = 'toggle-track'+(autoSync?' on':'');
-  fbLog(autoSync?'✅ Sync automático ATIVADO — novos registros serão enviados em tempo real.':'🔕 Sync automático desativado.', autoSync?'ok':'info');
-}
-
-function salvarConfigFirebase(){
-  fbConfig={
-    apikey:     document.getElementById('fb-apikey').value.trim(),
-    projectid:  document.getElementById('fb-projectid').value.trim(),
-    collection: document.getElementById('fb-collection').value.trim()||'abastecimentos'
-  };
-  localStorage.setItem('fbConfig',JSON.stringify(fbConfig));
-  fbLog('Configuração salva.','ok');
-  showToast('💾 Config Firebase salva!');
-}
-
-function _fbUrl(pid,col,docId=''){
-  const key = fbConfig.apikey;
-  const base = `https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/${col}`;
-  return docId ? `${base}/${docId}?key=${key}` : `${base}?key=${key}`;
-}
-
-function _regToFields(r){
-  const fields={};
-  Object.keys(r).forEach(k=>{
-    if(typeof r[k]==='number')       fields[k]={doubleValue:r[k]};
-    else if(typeof r[k]==='string')  fields[k]={stringValue:r[k]};
-    else if(typeof r[k]==='boolean') fields[k]={booleanValue:r[k]};
-  });
-  return {fields};
-}
-
-// Salvar UM registro no Firestore (chamado automaticamente ao registrar)
-async function fbSalvarRegistro(reg){
-  if(!autoSync) return;
-  const pid = fbConfig.projectid, col = fbConfig.collection||'abastecimentos', key = fbConfig.apikey;
-  if(!pid||!key) return;
-  try{
-    const docId = String(reg.id);
-    const url = `https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/${col}/${docId}?key=${key}`;
-    const res = await fetch(url, {
-      method: 'PATCH',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(_regToFields(reg))
-    });
-    if(res.ok){
-      fbLog(`☁️ Registro ${reg.placa} ${reg.data} salvo no Firebase.`,'ok');
-      setFbStatus('online');
-    } else {
-      const e = await res.json();
-      fbLog(`⚠️ Erro ao salvar ${reg.placa}: ${e.error?.message||res.status}`,'err');
-    }
-  } catch(e){ fbLog('❌ Falha de rede: '+e.message,'err'); }
-}
-
-async function testarConexaoFirebase(){
-  const pid = document.getElementById('fb-projectid').value.trim();
-  const col = document.getElementById('fb-collection').value.trim()||'abastecimentos';
-  const key = document.getElementById('fb-apikey').value.trim();
-  if(!pid||!key){fbLog('Preencha API Key e Project ID.','err');return}
-  fbLog('Testando conexão com Firestore...','info');
-  setFbStatus('...');
-  try{
-    const r = await fetch(`https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/${col}?pageSize=1&key=${key}`);
-    if(r.ok){fbLog('✅ Conexão bem-sucedida!','ok');setFbStatus('online');}
-    else{const e=await r.json();fbLog('❌ '+( e.error?.message||r.status),'err');setFbStatus('erro');}
-  }catch(e){fbLog('❌ Falha: '+e.message,'err');setFbStatus('erro');}
-}
-
-async function enviarParaFirebase(){
-  const pid = document.getElementById('fb-projectid').value.trim();
-  const col = document.getElementById('fb-collection').value.trim()||'abastecimentos';
-  const key = document.getElementById('fb-apikey').value.trim();
-  if(!pid||!key){fbLog('Configure as credenciais primeiro.','err');return}
-  if(!registros.length){fbLog('Nenhum registro local para enviar.','info');return}
-  fbLog(`Enviando ${registros.length} registros...`,'info');
-
-  // Mostrar barra de progresso
-  const bar = document.getElementById('fb-sync-bar');
-  const prog = document.getElementById('fb-sync-progress');
-  const lbl = document.getElementById('fb-sync-label');
-  bar.style.display='block'; prog.style.width='0%';
-
-  let ok=0, err=0;
-  for(let i=0;i<registros.length;i++){
-    const r = registros[i];
-    try{
-      const url = `https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/${col}/${r.id}?key=${key}`;
-      const res = await fetch(url,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(_regToFields(r))});
-      if(res.ok) ok++; else err++;
-    }catch{ err++; }
-    const pct = Math.round((i+1)/registros.length*100);
-    prog.style.width = pct+'%';
-    lbl.textContent = `Enviando ${i+1}/${registros.length}...`;
-  }
-  bar.style.display='none';
-  fbLog(`Concluído: ${ok} enviados, ${err} erros.`, err>0?'err':'ok');
-  setFbStatus(err===0?'online':'erro');
-}
-
-async function importarDoFirebase(){
-  const pid = document.getElementById('fb-projectid').value.trim();
-  const col = document.getElementById('fb-collection').value.trim()||'abastecimentos';
-  const key = document.getElementById('fb-apikey').value.trim();
-  if(!pid||!key){fbLog('Configure as credenciais primeiro.','err');return}
-  fbLog('Importando dados do Firestore...','info');
-  try{
-    // Paginação: buscar todos os documentos
-    let all=[], pageToken='';
-    do {
-      const url = `https://firestore.googleapis.com/v1/projects/${pid}/databases/(default)/documents/${col}?pageSize=300${pageToken?'&pageToken='+pageToken:''}&key=${key}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if(!data.documents) break;
-      data.documents.forEach(doc=>{
-        const f=doc.fields; const obj={};
-        Object.keys(f).forEach(k=>{obj[k]=f[k].doubleValue??f[k].integerValue??f[k].stringValue??f[k].booleanValue??''});
-        all.push(obj);
-      });
-      pageToken = data.nextPageToken||'';
-    } while(pageToken);
-
-    registros = all.sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
-    localStorage.setItem('abastecimentos',JSON.stringify(registros));
-    atualizarBadge();
-    fbLog(`✅ ${registros.length} registros importados.`,'ok');
-    showToast(`📥 ${registros.length} registros importados!`);
-  }catch(e){fbLog('❌ Erro: '+e.message,'err')}
+function fbLog(msg, tipo='info'){
+  const log = document.getElementById('fb-log');
+  if(!log) return;
+  const line = document.createElement('div');
+  line.className = 'fb-log-line ' + tipo;
+  line.textContent = '[' + new Date().toLocaleTimeString('pt-BR') + '] ' + msg;
+  log.insertBefore(line, log.firstChild);
+  while(log.children.length > 50) log.removeChild(log.lastChild);
 }
 
 function setFbStatus(s){
-  const dot=document.getElementById('fb-dot');
-  const txt=document.getElementById('fb-status-txt');
-  if(s==='online'){dot.className='fb-dot online';txt.textContent='Conectado ao Firebase ✅'}
-  else if(s==='erro'){dot.className='fb-dot erro';txt.textContent='Erro de conexão ❌'}
-  else{dot.className='fb-dot';txt.textContent='Verificando...'}
+  const dot = document.getElementById('fb-dot');
+  const txt = document.getElementById('fb-status-txt');
+  if(!dot||!txt) return;
+  if(s==='online'){ dot.className='fb-dot online'; txt.textContent='Conectado ao Realtime Database ✅'; }
+  else if(s==='erro'){ dot.className='fb-dot erro'; txt.textContent='Erro de conexão ❌'; }
+  else { dot.className='fb-dot'; txt.textContent='Verificando...'; }
 }
+
+function carregarConfigFirebase(){
+  // Credenciais são fixas no SDK — apenas mostra o status
+  const track = document.getElementById('toggle-track');
+  if(track) track.className = 'toggle-track on';
+  fbLog('🔥 Firebase Realtime Database configurado e ativo.', 'ok');
+}
+
+// Salvar UM registro no Realtime DB (chamado automaticamente ao registrar)
+async function fbSalvarRegistro(reg){
+  if(!window._fb){ fbLog('SDK ainda carregando...','info'); return; }
+  await window._fb.salvar(reg);
+}
+
+async function testarConexaoFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  await window._fb.testar();
+}
+
+async function enviarParaFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  if(!registros.length){ fbLog('Nenhum registro local para enviar.','info'); return; }
+  await window._fb.enviarTodos(registros);
+}
+
+async function importarDoFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  await window._fb.importar();
+}
+
+// Toggle e salvarConfigFirebase mantidos por compatibilidade visual
+let autoSync = true;
+function toggleAutoSync(){ /* sync sempre ativo no Realtime DB */ }
+function salvarConfigFirebase(){ fbLog('Credenciais fixas no SDK — não é necessário salvar.','info'); }
 
 // ══════════════════════════════════════════════
 // EXPORTAR CSV
