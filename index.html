@@ -9,7 +9,8 @@
 <!-- Firebase SDK -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getDatabase, ref, set, onValue, off, push, remove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getDatabase, ref, set, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+  import { getStorage, ref as sRef, uploadString, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyBLjKJ-Lfp692yBF1uHIgtPfcGoUoBwvJ0",
@@ -22,16 +23,36 @@
   };
 
   const app = initializeApp(firebaseConfig);
-  const db  = getDatabase(app);
+  const db      = getDatabase(app);
+  const storage = getStorage(app);
 
   // ── Expõe funções para o código global ──────────────────────────
   window._fb = {
 
-    // Salva um registro no caminho abastecimentos/<id>
+    // Sobe foto para Storage e salva registro com URL no Realtime DB
     salvar: async function(reg) {
       try {
-        const regSemFoto = {...reg, foto: ''}; // não sobe base64 no Realtime DB
-        await set(ref(db, 'abastecimentos/' + reg.id), regSemFoto);
+        let fotoURL = '';
+
+        // Se tem foto base64, faz upload para o Storage
+        if (reg.foto && reg.foto.startsWith('data:')) {
+          fbLog('📷 Enviando foto para o Storage...', 'info');
+          const storageRef = sRef(storage, 'fotos/' + reg.id + '.jpg');
+          await uploadString(storageRef, reg.foto, 'data_url');
+          fotoURL = await getDownloadURL(storageRef);
+          fbLog('📷 Foto salva no Storage.', 'ok');
+
+          // Atualiza o registro local com a URL pública
+          const idx = registros.findIndex(r => r.id === reg.id);
+          if (idx !== -1) {
+            registros[idx].foto = fotoURL;
+            localStorage.setItem('abastecimentos', JSON.stringify(registros));
+          }
+        }
+
+        // Salva o registro no Realtime DB (sem base64, com URL)
+        const regParaSalvar = {...reg, foto: fotoURL};
+        await set(ref(db, 'abastecimentos/' + reg.id), regParaSalvar);
         fbLog('☁️ ' + reg.placa + ' ' + reg.data + ' salvo no Firebase.', 'ok');
         setFbStatus('online');
         return true;
@@ -42,10 +63,10 @@
       }
     },
 
-    // Envia todos os registros locais para o Firebase
+    // Envia todos os registros locais para o Firebase (com upload de fotos)
     enviarTodos: async function(lista) {
       fbLog('Enviando ' + lista.length + ' registros...', 'info');
-      const bar = document.getElementById('fb-sync-bar');
+      const bar  = document.getElementById('fb-sync-bar');
       const prog = document.getElementById('fb-sync-progress');
       const lbl  = document.getElementById('fb-sync-label');
       bar.style.display = 'block'; prog.style.width = '0%';
@@ -53,13 +74,23 @@
       for (let i = 0; i < lista.length; i++) {
         const r = lista[i];
         try {
-          await set(ref(db, 'abastecimentos/' + r.id), {...r, foto: ''});
+          let fotoURL = r.foto || '';
+          // Sobe foto base64 se ainda não for uma URL http
+          if (fotoURL.startsWith('data:')) {
+            const storageRef = sRef(storage, 'fotos/' + r.id + '.jpg');
+            await uploadString(storageRef, fotoURL, 'data_url');
+            fotoURL = await getDownloadURL(storageRef);
+            // Atualiza local
+            lista[i].foto = fotoURL;
+          }
+          await set(ref(db, 'abastecimentos/' + r.id), {...r, foto: fotoURL});
           ok++;
         } catch { err++; }
         const pct = Math.round((i+1)/lista.length*100);
         prog.style.width = pct + '%';
         lbl.textContent = 'Enviando ' + (i+1) + '/' + lista.length + '...';
       }
+      localStorage.setItem('abastecimentos', JSON.stringify(lista));
       bar.style.display = 'none';
       fbLog('Concluído: ' + ok + ' enviados, ' + err + ' erros.', err > 0 ? 'err' : 'ok');
       setFbStatus(err === 0 ? 'online' : 'erro');
@@ -496,7 +527,7 @@ input[type="file"]::file-selector-button{background:var(--fuel);color:#000;borde
 
     <!-- Foto -->
     <div class="field full">
-      <label>Foto da Bomba</label>
+      <label>Foto da Bomba <span class="req">*</span></label>
       <input type="file" id="af-foto" accept="image/*" capture="environment" onchange="previewFoto(this)">
       <div class="foto-preview" id="foto-preview"><img id="foto-img" src="" alt="Preview"></div>
     </div>
@@ -933,12 +964,17 @@ function salvarRegistro() {
   const combustivel = combustivelSelecionado;
   const motorista = document.getElementById('af-motorista').value.trim();
   const responsavel = document.getElementById('af-responsavel').value.trim();
+  const fotoSrc   = document.getElementById('foto-img').src || '';
+  const temFoto   = fotoSrc && fotoSrc !== window.location.href && fotoSrc.startsWith('data:');
 
   if(!placa||!km||!litragem||!combustivel||!motorista||!responsavel){
     showToast('⚠️ Preencha todos os campos obrigatórios',true); return;
   }
   if(!horaInicio||!horaFim){
     showToast('⚠️ Marque Início e Fim da operação!',true); return;
+  }
+  if(!temFoto){
+    showToast('⚠️ A foto da bomba é obrigatória!',true); return;
   }
 
   const hI  = horaInicio.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
@@ -947,8 +983,6 @@ function salvarRegistro() {
   const min = Math.floor(ms/60000), h=Math.floor(min/60), m=min%60;
   const dur = h>0?`${h}h ${m}min`:`${min}min`;
   const duracaoMin = min;
-
-  const fotoSrc = document.getElementById('foto-img').src||'';
   const agora = new Date();
 
   const reg = {
@@ -956,7 +990,7 @@ function salvarRegistro() {
     placa, km: parseFloat(km), litragem: parseFloat(litragem),
     combustivel, motorista, responsavel,
     horaInicio: hI, horaFim: hF, duracao: dur, duracaoMin,
-    foto: fotoSrc&&fotoSrc!==window.location.href?fotoSrc:'',
+    foto: fotoSrc, // base64 salvo local
     horario: agora.toLocaleString('pt-BR'),
     data: agora.toLocaleDateString('pt-BR'),
     timestamp: agora.getTime()
@@ -965,7 +999,7 @@ function salvarRegistro() {
   registros.unshift(reg);
   localStorage.setItem('abastecimentos', JSON.stringify(registros));
 
-  // Sync Firebase automático
+  // Sync Firebase: tenta subir foto para Storage e salvar URL
   fbSalvarRegistro(reg);
 
   // Descontar do tanque
