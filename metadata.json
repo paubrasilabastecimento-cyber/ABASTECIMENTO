@@ -1,0 +1,6 @@
+{
+  "name": "Controle de Frota e Abastecimento",
+  "description": "Sistema completo e altamente compatível para registro de abastecimentos de frota, controle de tanque, sincronização com Firebase e relatórios CSV.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
