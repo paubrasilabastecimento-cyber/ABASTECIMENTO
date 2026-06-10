@@ -1,0 +1,1766 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Frota Abastecimento</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getDatabase, ref, set, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBLjKJ-Lfp692yBF1uHIgtPfcGoUoBwvJ0",
+    authDomain: "abastecimento-78ae9.firebaseapp.com",
+    databaseURL: "https://abastecimento-78ae9-default-rtdb.firebaseio.com",
+    projectId: "abastecimento-78ae9",
+    storageBucket: "abastecimento-78ae9.firebasestorage.app",
+    messagingSenderId: "527386679510",
+    appId: "1:527386679510:web:eb890096aacc0aed079177"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getDatabase(app);
+
+  // ── Comprime foto base64 para ~80KB via canvas ───────────────────
+  function comprimirFoto(base64) {
+    return new Promise((resolve) => {
+      if (!base64 || !base64.startsWith('data:')) { resolve(''); return; }
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 800; // px no lado maior
+        let w = img.width, h = img.height;
+        if (w > h && w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+        else if (h > w && h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+        else if (w > MAX) { w = h = MAX; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.65));
+      };
+      img.onerror = () => resolve('');
+      img.src = base64;
+    });
+  }
+
+  // ── Expõe funções para o código global ──────────────────────────
+  window._fb = {
+
+    // Comprime foto e salva tudo no Realtime DB
+    salvar: async function(reg) {
+      try {
+        let fotoComprimida = '';
+        if (reg.foto && reg.foto.startsWith('data:')) {
+          fbLog('📷 Comprimindo foto...', 'info');
+          fotoComprimida = await comprimirFoto(reg.foto);
+          // Atualiza local com a foto comprimida
+          const idx = registros.findIndex(r => r.id === reg.id);
+          if (idx !== -1) {
+            registros[idx].foto = fotoComprimida;
+            localStorage.setItem('abastecimentos', JSON.stringify(registros));
+          }
+        }
+        const regParaSalvar = {...reg, foto: fotoComprimida};
+        await set(ref(db, 'abastecimentos/' + reg.id), regParaSalvar);
+        fbLog('☁️ ' + reg.placa + ' ' + reg.data + ' salvo no Firebase (com foto).', 'ok');
+        setFbStatus('online');
+        return true;
+      } catch(e) {
+        fbLog('❌ Erro ao salvar: ' + e.message, 'err');
+        setFbStatus('erro');
+        return false;
+      }
+    },
+
+    // Envia todos os registros locais para o Firebase
+    enviarTodos: async function(lista) {
+      fbLog('Enviando ' + lista.length + ' registros...', 'info');
+      const bar  = document.getElementById('fb-sync-bar');
+      const prog = document.getElementById('fb-sync-progress');
+      const lbl  = document.getElementById('fb-sync-label');
+      bar.style.display = 'block'; prog.style.width = '0%';
+      let ok = 0, err = 0;
+      for (let i = 0; i < lista.length; i++) {
+        const r = lista[i];
+        try {
+          let foto = r.foto || '';
+          if (foto.startsWith('data:')) foto = await comprimirFoto(foto);
+          await set(ref(db, 'abastecimentos/' + r.id), {...r, foto});
+          lista[i].foto = foto;
+          ok++;
+        } catch { err++; }
+        const pct = Math.round((i+1)/lista.length*100);
+        prog.style.width = pct + '%';
+        lbl.textContent = 'Enviando ' + (i+1) + '/' + lista.length + '...';
+      }
+      localStorage.setItem('abastecimentos', JSON.stringify(lista));
+      bar.style.display = 'none';
+      fbLog('Concluído: ' + ok + ' enviados, ' + err + ' erros.', err > 0 ? 'err' : 'ok');
+      setFbStatus(err === 0 ? 'online' : 'erro');
+    },
+
+    // Limpa todos os registros do Firebase
+    limparTodos: async function() {
+      try {
+        await set(ref(db, 'abastecimentos'), null);
+        fbLog('🗑️ Todos os registros removidos do Firebase.', 'ok');
+      } catch(e) {
+        fbLog('❌ Erro ao limpar: ' + e.message, 'err');
+      }
+    },
+
+    // Escuta mudanças em tempo real e atualiza os registros locais
+    escutar: function() {
+      const r = ref(db, 'abastecimentos');
+      fbLog('🔴 Escutando mudanças em tempo real...', 'info');
+      onValue(r, (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+          registros = Object.values(data).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
+          localStorage.setItem('abastecimentos', JSON.stringify(registros));
+          atualizarBadge();
+          // Atualiza a aba ativa automaticamente
+          const paginaAtiva = document.querySelector('.page.active');
+          if(paginaAtiva) {
+            const id = paginaAtiva.id;
+            if(id==='page-registros') renderRegistros();
+            if(id==='page-dashboard') renderDashboard();
+            if(id==='page-tanque') renderTanque();
+          }
+          fbLog('🔄 Dados sincronizados: ' + registros.length + ' registros.', 'ok');
+          setFbStatus('online');
+        } else {
+          registros = [];
+          atualizarBadge();
+          const paginaAtiva = document.querySelector('.page.active');
+          if(paginaAtiva && paginaAtiva.id==='page-registros') renderRegistros();
+          fbLog('ℹ️ Nenhum dado no Firebase ainda.', 'info');
+        }
+      }, (error) => {
+        fbLog('❌ Erro no listener: ' + error.message, 'err');
+        setFbStatus('erro');
+      });
+    },
+
+    // Testa conexão tentando ler a raiz
+    testar: async function() {
+      fbLog('Testando conexão...', 'info');
+      setFbStatus('...');
+      try {
+        const r = ref(db, 'abastecimentos');
+        await new Promise((resolve, reject) => {
+          const unsub = onValue(r, (snap) => {
+            off(r, 'value', unsub);
+            resolve(snap);
+          }, reject, { onlyOnce: true });
+        });
+        fbLog('✅ Conexão bem-sucedida!', 'ok');
+        setFbStatus('online');
+      } catch(e) {
+        fbLog('❌ Falha: ' + e.message, 'err');
+        setFbStatus('erro');
+      }
+    },
+
+    // Importa dados do Firebase para local
+    importar: async function() {
+      fbLog('Importando dados do Firebase...', 'info');
+      try {
+        const r = ref(db, 'abastecimentos');
+        const snap = await new Promise((resolve, reject) => {
+          onValue(r, resolve, reject, { onlyOnce: true });
+        });
+        const data = snap.val();
+        if (!data) { fbLog('ℹ️ Nenhum dado encontrado no Firebase.', 'info'); return; }
+        registros = Object.values(data).sort((a,b) => (b.timestamp||0)-(a.timestamp||0));
+        localStorage.setItem('abastecimentos', JSON.stringify(registros));
+        atualizarBadge();
+        fbLog('✅ ' + registros.length + ' registros importados.', 'ok');
+        showToast('📥 ' + registros.length + ' registros importados!');
+      } catch(e) {
+        fbLog('❌ Erro: ' + e.message, 'err');
+      }
+    }
+  };
+
+  // Inicia escuta em tempo real assim que a página carrega
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      if (window._fb) window._fb.escutar();
+    }, 500);
+  });
+</script>
+<style>
+:root{
+  --fuel:#f59e0b;--fuel-dark:#d97706;--bg:#0f1117;--surface:#1a1d27;
+  --surface2:#22263a;--border:#2e3350;--text:#e8eaf0;--muted:#6b7280;
+  --green:#10b981;--red:#ef4444;--blue:#3b82f6;--purple:#a78bfa;
+  --orange:#f97316;--cyan:#06b6d4;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Barlow',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+/* HEADER */
+.header{background:var(--surface);border-bottom:2px solid var(--fuel);padding:0 16px;display:flex;align-items:center;gap:12px;height:54px;position:sticky;top:0;z-index:120}
+.header-title{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;letter-spacing:1px;text-transform:uppercase}
+.header-title span{color:var(--fuel)}
+
+/* SIDEBAR */
+.sidebar-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:150;opacity:0;pointer-events:none;transition:opacity .25s;backdrop-filter:blur(3px)}
+.sidebar-overlay.open{opacity:1;pointer-events:all}
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:220px;background:var(--surface);border-right:1px solid var(--border);z-index:160;display:flex;flex-direction:column;transform:translateX(-100%);transition:transform .28s cubic-bezier(.4,0,.2,1)}
+.sidebar.open{transform:translateX(0)}
+.sidebar-head{padding:16px 16px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.sidebar-logo{font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:800;letter-spacing:1px;text-transform:uppercase}
+.sidebar-logo span{color:var(--fuel)}
+.sidebar-nav{flex:1;overflow-y:auto;padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+.nav-btn{font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:12px 14px;border:none;background:transparent;color:var(--muted);cursor:pointer;border-radius:9px;transition:all .18s;white-space:nowrap;display:flex;align-items:center;gap:10px;width:100%;text-align:left}
+.nav-btn:hover{color:var(--text);background:var(--surface2)}
+.nav-btn.active{color:var(--fuel);background:#f59e0b14}
+.nav-btn .nav-icon{font-size:17px;width:22px;text-align:center;flex-shrink:0}
+.sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+
+/* HAMBURGER */
+.hamburger{background:none;border:none;cursor:pointer;padding:8px;border-radius:8px;display:flex;flex-direction:column;gap:5px;transition:background .2s}
+.hamburger:hover{background:var(--surface2)}
+.hamburger span{display:block;width:20px;height:2px;background:var(--text);border-radius:2px;transition:all .25s}
+.hamburger.open span:nth-child(1){transform:translateY(7px) rotate(45deg)}
+.hamburger.open span:nth-child(2){opacity:0}
+.hamburger.open span:nth-child(3){transform:translateY(-7px) rotate(-45deg)}
+
+/* LAYOUT COM SIDEBAR */
+.app-body{transition:margin-left .28s}
+
+@media(min-width:769px){
+  .sidebar{transform:translateX(0)!important}
+  .sidebar-overlay{display:none!important}
+  .hamburger{display:none!important}
+  .app-body{margin-left:220px}
+  .header{padding-left:24px}
+}
+@media(max-width:768px){
+  .sidebar{width:240px}
+}
+
+/* PAGES */
+.page{display:none;padding:20px 16px;max-width:720px;margin:0 auto}
+.page.active{display:block}
+.page.wide{max-width:100%}
+.app-body{min-height:calc(100vh - 54px)}
+
+/* SECTION TITLE */
+.sec-title{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.sec-title::after{content:'';flex:1;height:2px;background:var(--border)}
+
+/* FORM */
+.form-grid{display:grid;gap:13px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field.full{grid-column:1/-1}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+label{font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+label .req{color:var(--fuel);margin-left:2px}
+select,input[type="text"],input[type="number"],input[type="password"],input[type="file"]{
+  background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;
+  color:var(--text);font-family:'Barlow',sans-serif;font-size:15px;padding:10px 13px;
+  outline:none;transition:border-color .2s;width:100%;-webkit-appearance:none;appearance:none
+}
+select{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:34px}
+select:focus,input:focus{border-color:var(--fuel)}
+input[type="file"]{padding:9px;cursor:pointer;color:var(--muted);font-size:13px}
+input[type="file"]::file-selector-button{background:var(--fuel);color:#000;border:none;border-radius:5px;padding:5px 10px;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:12px;text-transform:uppercase;cursor:pointer;margin-right:8px}
+
+/* COMBUSTÍVEL */
+.combo-toggle{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.combo-btn{padding:11px;border:1.5px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:15px;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px}
+.combo-btn:hover{border-color:var(--fuel);color:var(--text)}
+.combo-btn.selected{border-color:var(--fuel);background:#f59e0b1a;color:var(--fuel)}
+.combo-btn.selected-arla{border-color:var(--blue);background:#3b82f61a;color:var(--blue)}
+
+/* FOTO */
+.foto-preview{display:none;margin-top:8px;border-radius:8px;overflow:hidden;border:1.5px solid var(--border);max-height:200px;text-align:center}
+.foto-preview img{max-width:100%;max-height:200px;object-fit:contain}
+
+/* BTN */
+.btn-submit{width:100%;padding:14px;background:var(--fuel);color:#000;border:none;border-radius:10px;font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;margin-top:6px;transition:background .2s,transform .1s;display:flex;align-items:center;justify-content:center;gap:9px}
+.btn-submit:hover{background:var(--fuel-dark)}
+.btn-submit:active{transform:scale(.98)}
+.btn-sec{background:transparent;border:1.5px solid var(--border);color:var(--muted);border-radius:8px;padding:9px 16px;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;transition:all .2s}
+.btn-sec:hover{border-color:var(--fuel);color:var(--fuel)}
+.btn-danger{border-color:var(--red);color:var(--red)}
+.btn-danger:hover{background:#ef44441a}
+
+/* TOAST */
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--green);color:#fff;padding:11px 22px;border-radius:30px;font-weight:600;font-size:14px;transition:transform .4s cubic-bezier(.34,1.56,.64,1);z-index:999;white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.toast.show{transform:translateX(-50%) translateY(0)}
+.toast.erro{background:var(--red)}
+
+/* HORA */
+.hora-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.hora-box{background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:10px 13px;display:flex;flex-direction:column;gap:3px;transition:border-color .2s}
+.hora-box.ativa{border-color:var(--fuel)}
+.hora-label-top{font-size:10px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.hora-valor{font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:800;letter-spacing:2px;color:var(--text);line-height:1}
+.hora-valor.vazio{color:var(--muted);font-size:18px;font-weight:400}
+.hora-btn{margin-top:6px;width:100%;padding:7px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;transition:all .2s}
+.hora-btn:hover{border-color:var(--fuel);color:var(--fuel)}
+.hora-btn.marcado{background:#f59e0b22;border-color:var(--fuel);color:var(--fuel)}
+.duracao-bar{background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:10px 13px;display:flex;align-items:center;gap:11px}
+.duracao-valor{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:800;color:var(--green)}
+
+/* REGISTROS */
+.registros-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:10px}
+.badge-count{background:var(--fuel);color:#000;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:12px;padding:2px 9px;border-radius:20px}
+.empty-state{text-align:center;padding:48px 20px;color:var(--muted)}
+.empty-state .icon{font-size:44px;margin-bottom:10px}
+.registro-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:15px;margin-bottom:9px;display:grid;gap:7px;animation:slideIn .3s ease}
+@keyframes slideIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.card-top{display:flex;align-items:center;justify-content:space-between}
+.card-placa{font-family:'Barlow Condensed',sans-serif;font-size:19px;font-weight:800;letter-spacing:2px;color:var(--fuel)}
+.card-time{font-size:11px;color:var(--muted)}
+.card-chips{display:flex;flex-wrap:wrap;gap:5px}
+.chip{background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;font-size:12px;font-weight:500;color:var(--text);display:flex;align-items:center;gap:4px}
+.chip.diesel{border-color:var(--fuel);color:var(--fuel)}
+.chip.arla{border-color:var(--blue);color:var(--blue)}
+.chip.km{border-color:var(--green);color:var(--green)}
+.chip.tempo{border-color:var(--purple);color:var(--purple)}
+.card-info{font-size:12px;color:var(--muted)}
+.card-info strong{color:var(--text)}
+.card-foto{margin-top:4px;border-radius:6px;overflow:hidden;border:1px solid var(--border);max-height:110px;cursor:pointer}
+.card-foto img{width:100%;object-fit:cover;max-height:110px}
+
+/* SENHA OVERLAY */
+.senha-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:200;backdrop-filter:blur(6px)}
+.senha-box{background:var(--surface);border:1.5px solid var(--border);border-radius:16px;padding:32px 28px;width:min(340px,90vw);text-align:center;display:flex;flex-direction:column;gap:16px}
+.senha-icon{font-size:40px}
+.senha-title{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;text-transform:uppercase;letter-spacing:1px}
+.senha-sub{font-size:13px;color:var(--muted)}
+.senha-input{text-align:center;letter-spacing:4px;font-size:20px}
+.senha-errou{color:var(--red);font-size:13px;display:none}
+
+/* DASHBOARD */
+.dash-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+.kpi-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:6px}
+.kpi-icon{font-size:22px}
+.kpi-label{font-size:10px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.kpi-value{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:800;color:var(--text)}
+.kpi-value.fuel{color:var(--fuel)}
+.kpi-value.green{color:var(--green)}
+.kpi-value.blue{color:var(--blue)}
+.kpi-value.red{color:var(--red)}
+.kpi-sub{font-size:11px;color:var(--muted)}
+.chart-card{background:linear-gradient(160deg,#161a2a 60%,#111525);border:1px solid #2a2e4a;border-radius:14px;padding:18px;margin-bottom:12px}
+.chart-wrap{position:relative;height:220px}
+.chart-title{font-family:'Barlow Condensed',sans-serif;font-size:15px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px;color:var(--muted)}
+.ranking-list{display:flex;flex-direction:column;gap:8px}
+.rank-row{display:flex;align-items:center;gap:10px;background:var(--surface2);border-radius:8px;padding:10px 12px}
+.rank-pos{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:800;width:24px;color:var(--muted);text-align:center}
+.rank-pos.gold{color:#fbbf24}
+.rank-pos.silver{color:#9ca3af}
+.rank-pos.bronze{color:#cd7c2f}
+.rank-placa{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;flex:1}
+.rank-val{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:700;color:var(--fuel)}
+.rank-bar-wrap{width:100%;height:4px;background:var(--border);border-radius:2px;margin-top:3px}
+.rank-bar{height:4px;background:var(--fuel);border-radius:2px;transition:width .6s}
+.dash-2col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* TANQUE */
+.tank-config{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+.tank-visual-wrap{display:flex;justify-content:center;margin:16px 0}
+.tank-outer{width:140px;height:260px;border:3px solid var(--border);border-radius:16px;position:relative;overflow:hidden;background:var(--surface2)}
+.tank-fill{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(180deg,#f59e0b88,var(--fuel));transition:height 1s ease;display:flex;align-items:flex-start;justify-content:center;padding-top:8px}
+.tank-fill.baixo{background:linear-gradient(180deg,#ef444488,var(--red))}
+.tank-fill.medio{background:linear-gradient(180deg,#f59e0b88,var(--fuel))}
+.tank-fill.alto{background:linear-gradient(180deg,#10b98188,var(--green))}
+.tank-pct{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.5)}
+.tank-label-ext{font-family:'Barlow Condensed',sans-serif;font-size:13px;color:var(--muted);text-align:center;margin-top:4px}
+.tank-markers{position:absolute;right:-38px;top:0;height:100%;display:flex;flex-direction:column;justify-content:space-between;font-size:10px;color:var(--muted);font-weight:600}
+.tank-stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.tank-stat{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+.tank-stat .val{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:800}
+.tank-stat .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-top:2px}
+.tank-hist{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.tank-hist-row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px}
+.tank-hist-row:last-child{border-bottom:none}
+.tank-hist-row .pl{font-family:'Barlow Condensed',sans-serif;font-weight:700;letter-spacing:1px;font-size:14px}
+.tank-hist-row .lt{color:var(--red);font-weight:600}
+.tank-hist-row .dt{color:var(--muted);font-size:11px}
+.tank-alert{background:#ef444418;border:1px solid var(--red);border-radius:8px;padding:12px 14px;display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.tank-alert-txt{font-size:13px;color:var(--red);font-weight:600}
+
+/* FIREBASE */
+.fb-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:14px}
+.fb-label{font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.fb-status{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.fb-dot{width:10px;height:10px;border-radius:50%;background:var(--muted)}
+.fb-dot.online{background:var(--green);box-shadow:0 0 6px var(--green)}
+.fb-dot.erro{background:var(--red)}
+.fb-txt{font-size:13px;font-weight:600}
+.fb-log{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 13px;font-size:12px;color:var(--muted);font-family:monospace;max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.fb-log-line{padding:2px 0;border-bottom:1px solid var(--border)}
+.fb-log-line:last-child{border-bottom:none}
+.fb-log-line.ok{color:var(--green)}
+.fb-log-line.err{color:var(--red)}
+.fb-log-line.info{color:var(--blue)}
+
+/* iOS Safari: fix para touch em botões e selects */
+button, select, input { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+* { -webkit-tap-highlight-color: transparent; }
+
+/* Fix cursor pointer em elementos clicáveis no iOS */
+.nav-btn, .combo-btn, .btn-submit, .btn-sec, .hora-btn, .exp-card { cursor: pointer; }
+
+/* Fix input file no iOS */
+input[type="file"] { -webkit-appearance: none; }
+
+/* Fix select no iOS */
+select { -webkit-appearance: none; appearance: none; }
+
+/* Prevent iOS bounce que pode interferir no scroll */
+body { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+
+
+/* TOGGLE SWITCH */
+.toggle-wrap{width:42px;height:24px;cursor:pointer;flex-shrink:0}
+.toggle-track{width:42px;height:24px;background:var(--border);border-radius:12px;position:relative;transition:background .2s}
+.toggle-track.on{background:var(--green)}
+.toggle-track::after{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;background:#fff;border-radius:50%;transition:transform .2s;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.toggle-track.on::after{transform:translateX(18px)}
+
+/* EXPORT CARDS */
+.exp-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:15px;margin-bottom:9px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:border-color .2s,background .2s}
+.exp-card:hover{border-color:var(--fuel);background:#f59e0b08}
+.exp-icon{font-size:26px;width:34px;text-align:center;flex-shrink:0}
+.exp-info{flex:1}
+.exp-title{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:800;letter-spacing:.5px;margin-bottom:3px}
+.exp-sub{font-size:11px;color:var(--muted);line-height:1.5}
+.exp-btn{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:7px 13px;font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:13px;color:var(--fuel);white-space:nowrap;flex-shrink:0}
+</style>
+</head>
+<body>
+
+<!-- SIDEBAR OVERLAY -->
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-head">
+    <span style="font-size:22px">⛽</span>
+    <div class="sidebar-logo">Frota <span>Abastecimento</span></div>
+  </div>
+  <nav class="sidebar-nav">
+    <button class="nav-btn active" onclick="switchTab('form',this)">
+      <span class="nav-icon">⛽</span> Registro
+    </button>
+    <button class="nav-btn" onclick="switchTab('registros',this)">
+      <span class="nav-icon">📋</span> Histórico
+      <span id="badge" class="badge-count" style="display:none;margin-left:auto">0</span>
+    </button>
+    <button class="nav-btn" onclick="switchTab('dashboard',this)">
+      <span class="nav-icon">📊</span> Dashboard
+    </button>
+    <button class="nav-btn" onclick="switchTab('tanque',this)">
+      <span class="nav-icon">🛢</span> Tanque
+    </button>
+    <button class="nav-btn" onclick="switchTab('firebase',this)">
+      <span class="nav-icon">🔥</span> Firebase
+    </button>
+    <button class="nav-btn" onclick="switchTab('exportar',this)">
+      <span class="nav-icon">📥</span> Exportar CSV
+    </button>
+  </nav>
+  <div class="sidebar-footer">v1.0 · Controle de Frota</div>
+</aside>
+
+<header class="header">
+  <button class="hamburger" id="hamburger" onclick="toggleSidebar()">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="header-title">Frota <span>Abastecimento</span></div>
+  <div id="sync-indicator" style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+    <div id="sync-dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted);animation:pulse 1.2s infinite"></div>
+    <span id="sync-txt">Sincronizando...</span>
+  </div>
+</header>
+<style>
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+
+<div class="app-body">
+
+<!-- ════════════ ABA: ABASTECIMENTO ════════════ -->
+<div id="page-form" class="page active">
+  <div class="sec-title">📝 Novo Abastecimento</div>
+  <div class="form-grid">
+
+    <!-- HORA INÍCIO/FIM — PRIMEIRO -->
+    <div class="field full">
+      <label>Horário da Operação <span class="req">*</span></label>
+      <div class="hora-row">
+        <div class="hora-box" id="box-inicio">
+          <span class="hora-label-top">🟢 Início</span>
+          <span class="hora-valor vazio" id="val-inicio">--:--</span>
+          <button class="hora-btn" id="btn-inicio" onclick="marcarHora('inicio')">⏱ Marcar Início</button>
+        </div>
+        <div class="hora-box" id="box-fim">
+          <span class="hora-label-top">🔴 Fim</span>
+          <span class="hora-valor vazio" id="val-fim">--:--</span>
+          <button class="hora-btn" id="btn-fim" onclick="marcarHora('fim')">⏱ Marcar Fim</button>
+        </div>
+      </div>
+    </div>
+    <div class="field full" id="field-duracao" style="display:none">
+      <div class="duracao-bar">
+        <span style="font-size:20px">⏳</span>
+        <div style="flex:1">
+          <div style="font-size:10px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Duração Total</div>
+          <div class="duracao-valor" id="val-duracao">--</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Placa -->
+    <div class="field">
+      <label>Placa do Veículo <span class="req">*</span></label>
+      <select id="af-placa" onchange="togglePlacaOutro()">
+        <option value="" disabled selected>Selecione</option>
+        <option>QSK7D92</option><option>OXO0532</option><option>OXO0542</option>
+        <option>OXO0552</option><option>OXO0782</option><option>SLB4A26</option>
+        <option>NPR2601</option><option>SLB4A56</option><option>TOZ8B20</option>
+        <option>TOZ8B50</option><option>RLR8G79</option><option>RLU4H49</option>
+        <option>TOU7F79</option><option>RLW0C17</option><option>SLB3J76</option>
+        <option>RLU3F59</option><option>RLT5J54</option><option>RLT5J44</option>
+        <option value="outra">Outra...</option>
+      </select>
+      <input id="af-placa-outro" type="text" placeholder="Digite a placa" maxlength="8" style="display:none;margin-top:6px">
+    </div>
+
+    <!-- KM -->
+    <div class="field">
+      <label>KM do Veículo <span class="req">*</span></label>
+      <input type="number" id="af-km" placeholder="Ex: 125430" min="0">
+    </div>
+
+    <!-- Combustível -->
+    <div class="field full">
+      <label>Combustível <span class="req">*</span></label>
+      <div class="combo-toggle">
+        <button class="combo-btn" id="btn-diesel" onclick="selectCombustivel('DIESEL')">🟡 Diesel</button>
+        <button class="combo-btn" id="btn-arla" onclick="selectCombustivel('ARLA')">🔵 Arla 32</button>
+      </div>
+      <input type="hidden" id="af-combustivel">
+    </div>
+
+    <!-- Litragem -->
+    <div class="field">
+      <label>Litragem (L) <span class="req">*</span></label>
+      <input type="number" id="af-litragem" placeholder="Ex: 120.5" min="0" step="0.1">
+    </div>
+
+    <!-- Motorista -->
+    <div class="field">
+      <label>Motorista <span class="req">*</span></label>
+      <input type="text" id="af-motorista" placeholder="Nome do motorista">
+    </div>
+
+    <!-- Responsável -->
+    <div class="field full">
+      <label>Responsável pelo Abastecimento <span class="req">*</span></label>
+      <input type="text" id="af-responsavel" placeholder="Nome do responsável">
+    </div>
+
+    <!-- Foto -->
+    <div class="field full">
+      <label>Foto da Bomba <span class="req">*</span></label>
+      <input type="file" id="af-foto" accept="image/*" onchange="previewFoto(this)">
+      <div class="foto-preview" id="foto-preview"><img id="foto-img" src="" alt="Preview"></div>
+    </div>
+
+    <div class="field full">
+      <button class="btn-submit" onclick="salvarRegistro()">✅ Registrar Abastecimento</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ ABA: HISTÓRICO (com senha) ════════════ -->
+<div id="page-registros" class="page">
+  <div class="registros-header">
+    <div class="sec-title" style="margin-bottom:0;flex:1">📋 Histórico</div>
+    <button class="btn-sec btn-danger" onclick="limparRegistros()">🗑 Limpar</button>
+  </div>
+  <div id="lista-registros">
+    <div class="empty-state"><div class="icon">⛽</div><p>Nenhum abastecimento registrado.</p></div>
+  </div>
+</div>
+
+<!-- OVERLAY SENHA -->
+<div class="senha-overlay" id="senha-overlay" style="display:none">
+  <div class="senha-box">
+    <div class="senha-icon">🔒</div>
+    <div class="senha-title">Área Protegida</div>
+    <div class="senha-sub">Digite a senha para continuar</div>
+    <input type="password" class="senha-input" id="senha-input" placeholder="••••••" maxlength="10" onkeyup="if(event.key==='Enter'||event.keyCode===13)verificarSenha()" autocomplete="current-password" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <div class="senha-errou" id="senha-errou">❌ Senha incorreta. Tente novamente.</div>
+    <button class="btn-submit" onclick="verificarSenha()">🔓 Entrar</button>
+  </div>
+</div>
+
+<!-- ════════════ ABA: DASHBOARD ════════════ -->
+<div id="page-dashboard" class="page wide" style="padding:20px 16px">
+  <div class="sec-title">📊 Dashboard de Frota</div>
+
+  <!-- KPIs -->
+  <div class="dash-grid" id="dash-kpis">
+    <div class="kpi-card"><div class="kpi-icon">⛽</div><div class="kpi-label">Total Abastecido</div><div class="kpi-value fuel" id="kpi-total-l">0 L</div><div class="kpi-sub">todos os registros</div></div>
+    <div class="kpi-card"><div class="kpi-icon">🚛</div><div class="kpi-label">Veículos Ativos</div><div class="kpi-value blue" id="kpi-veiculos">0</div><div class="kpi-sub">placas únicas</div></div>
+    <div class="kpi-card"><div class="kpi-icon">📋</div><div class="kpi-label">Abastecimentos</div><div class="kpi-value" id="kpi-qtd">0</div><div class="kpi-sub">total de registros</div></div>
+    <div class="kpi-card"><div class="kpi-icon">📅</div><div class="kpi-label">Consumo Semanal</div><div class="kpi-value green" id="kpi-semanal">0 L</div><div class="kpi-sub">últimos 7 dias</div></div>
+    <div class="kpi-card"><div class="kpi-icon">🗓</div><div class="kpi-label">Consumo Mensal</div><div class="kpi-value green" id="kpi-mensal">0 L</div><div class="kpi-sub">últimos 30 dias</div></div>
+    <div class="kpi-card"><div class="kpi-icon">⏱</div><div class="kpi-label">Tempo Médio Op.</div><div class="kpi-value" id="kpi-tempo-medio">--</div><div class="kpi-sub">por abastecimento</div></div>
+    <div class="kpi-card"><div class="kpi-icon">🏆</div><div class="kpi-label">Maior Consumidor</div><div class="kpi-value fuel" id="kpi-maior" style="font-size:18px">--</div><div class="kpi-sub" id="kpi-maior-sub">--</div></div>
+    <div class="kpi-card"><div class="kpi-icon">🛢</div><div class="kpi-label">Nível do Tanque</div><div class="kpi-value" id="kpi-tanque-pct" style="font-size:22px">--%</div><div class="kpi-sub" id="kpi-tanque-l">-- L restantes</div></div>
+  </div>
+
+  <div class="dash-2col">
+    <!-- Ranking consumo -->
+    <div class="chart-card">
+      <div class="chart-title">🏆 Ranking — Maior Consumo Total (L)</div>
+      <div class="ranking-list" id="ranking-consumo"></div>
+    </div>
+    <!-- Ranking demora -->
+    <div class="chart-card">
+      <div class="chart-title">⏳ Ranking — Maior Tempo por Abastecimento</div>
+      <div class="ranking-list" id="ranking-tempo"></div>
+    </div>
+  </div>
+
+  <!-- Gráfico consumo por veículo -->
+  <div class="chart-card">
+    <div class="chart-title">📊 Consumo Total por Veículo (L)</div>
+    <div class="chart-wrap"><canvas id="chart-veiculos"></canvas></div>
+  </div>
+
+  <!-- Consumo semanal x mensal -->
+  <div class="dash-2col">
+    <div class="chart-card">
+      <div class="chart-title">📅 Consumo Semanal por Veículo (L)</div>
+      <div class="chart-wrap"><canvas id="chart-semanal"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">🗓 Consumo Mensal por Veículo (L)</div>
+      <div class="chart-wrap"><canvas id="chart-mensal"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Linha temporal -->
+  <div class="chart-card">
+    <div class="chart-title">📈 Evolução de Abastecimentos (por data)</div>
+    <div class="chart-wrap"><canvas id="chart-linha"></canvas></div>
+  </div>
+</div>
+
+<!-- ════════════ ABA: TANQUE ════════════ -->
+<div id="page-tanque" class="page">
+  <div class="sec-title">🛢 Controle do Tanque</div>
+
+  <div id="tanque-alert" class="tank-alert" style="display:none">
+    <span style="font-size:22px">⚠️</span>
+    <div class="tank-alert-txt" id="tanque-alert-txt">Nível baixo! Recomenda-se reabastecimento do tanque.</div>
+  </div>
+
+  <div class="tank-config">
+    <div class="fb-label">Configurar Tanque</div>
+    <div class="form-row" style="margin-bottom:10px">
+      <div class="field">
+        <label>Capacidade Total (L)</label>
+        <input type="number" id="tank-capacidade" placeholder="Ex: 15000" min="100" onchange="salvarTanqueConfig()">
+      </div>
+      <div class="field">
+        <label>Volume Atual (L) <span class="req">*</span></label>
+        <input type="number" id="tank-atual" placeholder="Ex: 12000" min="0" onchange="salvarTanqueConfig()">
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--muted)">💡 O volume atual é decrementado automaticamente a cada abastecimento registrado.</div>
+  </div>
+
+  <!-- Visual do tanque -->
+  <div style="display:flex;flex-direction:column;align-items:center;margin-bottom:20px">
+    <div style="position:relative">
+      <div class="tank-outer" id="tank-outer">
+        <div class="tank-fill" id="tank-fill">
+          <span class="tank-pct" id="tank-pct-txt">--%</span>
+        </div>
+      </div>
+      <div class="tank-markers">
+        <span>100%</span><span>75%</span><span>50%</span><span>25%</span><span>0%</span>
+      </div>
+    </div>
+    <div class="tank-label-ext" id="tank-label-l" style="margin-top:10px">Configure o tanque acima</div>
+  </div>
+
+  <!-- Stats -->
+  <div class="tank-stats-grid">
+    <div class="tank-stat"><div class="val fuel" id="ts-capacidade">--</div><div class="lbl">Capacidade</div></div>
+    <div class="tank-stat"><div class="val green" id="ts-atual">--</div><div class="lbl">Nível Atual</div></div>
+    <div class="tank-stat"><div class="val" id="ts-consumido">--</div><div class="lbl">Consumido (Total)</div></div>
+    <div class="tank-stat"><div class="val blue" id="ts-abastecimentos">--</div><div class="lbl">Abastecimentos</div></div>
+  </div>
+
+  <!-- Histórico de saídas do tanque -->
+  <div class="sec-title" style="margin-top:8px">📤 Últimas Saídas</div>
+  <div class="tank-hist" id="tank-hist-list">
+    <div style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Nenhum abastecimento registrado ainda.</div>
+  </div>
+</div>
+
+<!-- ════════════ ABA: FIREBASE ════════════ -->
+<div id="page-firebase" class="page">
+  <div class="sec-title">🔥 Firebase Realtime Database</div>
+
+  <!-- Status -->
+  <div class="fb-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+      <div class="fb-status" style="margin:0">
+        <div class="fb-dot" id="fb-dot"></div>
+        <span class="fb-txt" id="fb-status-txt">Conectando...</span>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--green);text-transform:none;letter-spacing:0">
+        🔴 Escuta em tempo real ativa
+      </label>
+    </div>
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:13px;color:var(--muted);line-height:1.7">
+      <strong style="color:var(--fuel)">Projeto:</strong> abastecimento-78ae9<br>
+      <strong style="color:var(--fuel)">Banco:</strong> Realtime Database<br>
+      <strong style="color:var(--fuel)">Nó:</strong> /abastecimentos<br>
+      <strong style="color:var(--fuel)">Sync:</strong> Automático — cada registro vai direto para o Firebase ao salvar
+    </div>
+  </div>
+
+  <!-- Sincronização manual -->
+  <div class="fb-card">
+    <div class="fb-label">Sincronização Manual</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+      <button class="btn-submit" style="margin-top:0;font-size:14px" onclick="enviarParaFirebase()">📤 Enviar Tudo</button>
+      <button class="btn-sec" onclick="importarDoFirebase()">📥 Importar do Firebase</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:14px">
+      <button class="btn-sec" onclick="testarConexaoFirebase()">🔌 Testar Conexão</button>
+    </div>
+    <div id="fb-sync-bar" style="display:none;margin-bottom:10px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:4px" id="fb-sync-label">Enviando...</div>
+      <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+        <div id="fb-sync-progress" style="height:100%;background:var(--fuel);border-radius:4px;width:0%;transition:width .3s"></div>
+      </div>
+    </div>
+    <div class="fb-label">Log de Atividade</div>
+    <div class="fb-log" id="fb-log">
+      <div class="fb-log-line info">Inicializando Firebase SDK...</div>
+    </div>
+  </div>
+
+  <!-- Info -->
+  <div class="fb-card">
+    <div class="fb-label">Como funciona</div>
+    <div style="font-size:13px;color:var(--muted);line-height:1.8">
+      ✅ <strong style="color:var(--text)">Sync automático:</strong> cada abastecimento salvo é enviado instantaneamente para o Firebase.<br>
+      🔄 <strong style="color:var(--text)">Escuta em tempo real:</strong> se outro dispositivo registrar algo, esta tela atualiza automaticamente.<br>
+      📤 <strong style="color:var(--text)">Enviar Tudo:</strong> sincroniza todos os registros locais para o Firebase.<br>
+      📥 <strong style="color:var(--text)">Importar:</strong> baixa todos os registros do Firebase para este dispositivo.<br>
+      <br>
+      ⚠️ <strong style="color:var(--fuel)">Fotos:</strong> comprimidas automaticamente para ~80KB e salvas direto no Realtime Database. Sem necessidade do Firebase Storage.
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ ABA: EXPORTAR CSV ════════════ -->
+<div id="page-exportar" class="page">
+  <div class="sec-title">📥 Exportar Relatórios</div>
+
+  <!-- Filtros -->
+  <div class="fb-card" style="margin-bottom:14px">
+    <div class="fb-label">Filtros de Período</div>
+    <div class="form-row" style="margin-bottom:12px">
+      <div class="field">
+        <label>Data Início</label>
+        <input type="text" id="exp-inicio" placeholder="DD/MM/AAAA" maxlength="10" oninput="maskDate(this)">
+      </div>
+      <div class="field">
+        <label>Data Fim</label>
+        <input type="text" id="exp-fim" placeholder="DD/MM/AAAA" maxlength="10" oninput="maskDate(this)">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field">
+        <label>Veículo (Placa)</label>
+        <select id="exp-placa">
+          <option value="">Todos</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Combustível</label>
+        <select id="exp-combustivel">
+          <option value="">Todos</option>
+          <option value="DIESEL">🟡 Diesel</option>
+          <option value="ARLA">🔵 Arla 32</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Relatórios disponíveis -->
+  <div class="fb-label" style="margin-bottom:10px">Relatórios</div>
+
+  <div class="exp-card" onclick="exportarCSV('completo')">
+    <div class="exp-icon">📋</div>
+    <div class="exp-info">
+      <div class="exp-title">Relatório Completo</div>
+      <div class="exp-sub">Todos os campos: placa, KM, litros, combustível, motorista, responsável, horário, duração</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div class="exp-card" onclick="exportarCSV('consumo')">
+    <div class="exp-icon">⛽</div>
+    <div class="exp-info">
+      <div class="exp-title">Consumo por Veículo</div>
+      <div class="exp-sub">Placa, total de litros, qtd. abastecimentos, média por operação, maior abastecimento</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div class="exp-card" onclick="exportarCSV('diario')">
+    <div class="exp-icon">📅</div>
+    <div class="exp-info">
+      <div class="exp-title">Consumo Diário</div>
+      <div class="exp-sub">Data, total de litros, quantidade de abastecimentos, veículos atendidos</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div class="exp-card" onclick="exportarCSV('motorista')">
+    <div class="exp-icon">👷</div>
+    <div class="exp-info">
+      <div class="exp-title">Por Motorista</div>
+      <div class="exp-sub">Motorista, total de litros, qtd. abastecimentos, veículos, tempo médio de operação</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div class="exp-card" onclick="exportarCSV('tempo')">
+    <div class="exp-icon">⏱</div>
+    <div class="exp-info">
+      <div class="exp-title">Tempos de Operação</div>
+      <div class="exp-sub">Placa, data, hora início, hora fim, duração em minutos, responsável</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div class="exp-card" onclick="exportarCSV('arla')">
+    <div class="exp-icon">🔵</div>
+    <div class="exp-info">
+      <div class="exp-title">Consumo de Arla 32</div>
+      <div class="exp-sub">Apenas registros de Arla 32: placa, data, litros, motorista</div>
+    </div>
+    <div class="exp-btn">⬇ CSV</div>
+  </div>
+
+  <div id="exp-preview" style="display:none;margin-top:16px">
+    <div class="fb-label">Pré-visualização</div>
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-x:auto;max-height:220px;overflow-y:auto">
+      <pre id="exp-preview-txt" style="font-size:11px;color:var(--muted);font-family:monospace;white-space:pre"></pre>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:10px">
+      <button class="btn-submit" style="flex:1;margin-top:0;font-size:14px" id="exp-download-btn" onclick="downloadCSVAtual()">⬇ Baixar CSV</button>
+      <button class="btn-sec" onclick="document.getElementById('exp-preview').style.display='none'">✕ Fechar</button>
+    </div>
+  </div>
+</div>
+
+</div><!-- /.app-body -->
+
+<div class="toast" id="toast">✅ Registrado!</div>
+
+<script>
+// ══════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════
+const SENHA_CORRETA = '1234'; // ← altere aqui
+let registros = []; // Dados vêm do Firebase em tempo real
+let tanqueCfg = JSON.parse(localStorage.getItem('tanqueCfg') || '{"capacidade":15000,"atual":15000}');
+let combustivelSelecionado = '';
+let horaInicio = null, horaFim = null;
+let senhaDesbloqueada = false;
+let chartVeiculos = null, chartSemanal = null, chartMensal = null, chartLinha = null;
+
+// ══════════════════════════════════════════════
+// TABS
+// ══════════════════════════════════════════════
+function switchTab(tab, btn) {
+  if (tab !== 'form' && !senhaDesbloqueada) {
+    document.getElementById('senha-overlay').style.display = 'flex';
+    document.getElementById('senha-input').value = '';
+    document.getElementById('senha-errou').style.display = 'none';
+    document.getElementById('senha-overlay').dataset.destino = tab;
+    document.getElementById('senha-overlay')._btn = btn;
+    document.getElementById('senha-input').focus();
+    return;
+  }
+  _activateTab(tab, btn);
+}
+function _activateTab(tab, btn) {
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-'+tab).classList.add('active');
+  if(btn) btn.classList.add('active');
+  if(tab==='registros') renderRegistros();
+  if(tab==='dashboard') renderDashboard();
+  if(tab==='tanque') renderTanque();
+  if(tab==='firebase') carregarConfigFirebase();
+  if(tab==='exportar') popularSelectPlacas();
+  if(window.innerWidth<=768) closeSidebar();
+}
+
+// ══════════════════════════════════════════════
+// SENHA
+// ══════════════════════════════════════════════
+function verificarSenha() {
+  const v = document.getElementById('senha-input').value;
+  if(v === SENHA_CORRETA) {
+    senhaDesbloqueada = true;
+    document.getElementById('senha-overlay').style.display = 'none';
+    const destino = document.getElementById('senha-overlay').dataset.destino || 'registros';
+    const btn = document.getElementById('senha-overlay')._btn;
+    if(destino === '__limpar__') {
+      _executarLimpar();
+    } else {
+      _activateTab(destino, btn);
+    }
+  } else {
+    document.getElementById('senha-errou').style.display = 'block';
+    document.getElementById('senha-input').value = '';
+    document.getElementById('senha-input').focus();
+  }
+}
+
+// ══════════════════════════════════════════════
+// HORA
+// ══════════════════════════════════════════════
+function marcarHora(tipo) {
+  const agora = new Date();
+  // iOS Safari: toLocaleTimeString pode retornar formato inesperado, usar manual
+  const hh = String(agora.getHours()).padStart(2,'0');
+  const mm = String(agora.getMinutes()).padStart(2,'0');
+  const hhmm = hh + ':' + mm;
+  if(tipo==='inicio'){
+    horaInicio = agora;
+    document.getElementById('val-inicio').textContent = hhmm;
+    document.getElementById('val-inicio').classList.remove('vazio');
+    document.getElementById('btn-inicio').classList.add('marcado');
+    document.getElementById('btn-inicio').textContent = '✅ Marcado';
+    document.getElementById('box-inicio').classList.add('ativa');
+  } else {
+    if(!horaInicio){showToast('⚠️ Marque o início primeiro!',true);return}
+    horaFim = agora;
+    document.getElementById('val-fim').textContent = hhmm;
+    document.getElementById('val-fim').classList.remove('vazio');
+    document.getElementById('btn-fim').classList.add('marcado');
+    document.getElementById('btn-fim').textContent = '✅ Marcado';
+    document.getElementById('box-fim').classList.add('ativa');
+  }
+  calcularDuracao();
+}
+function calcularDuracao() {
+  if(!horaInicio||!horaFim) return;
+  const ms = horaFim - horaInicio;
+  if(ms<0){document.getElementById('val-duracao').textContent='Inválido';return}
+  const mins = Math.floor(ms/60000), h = Math.floor(mins/60), m = mins%60;
+  const txt = h>0?`${h}h ${m}min`:`${mins}min ${Math.floor((ms%60000)/1000)}s`;
+  document.getElementById('val-duracao').textContent = txt;
+  document.getElementById('val-duracao').classList.remove('vazio');
+  document.getElementById('field-duracao').style.display = 'block';
+}
+
+// ══════════════════════════════════════════════
+// FORM
+// ══════════════════════════════════════════════
+function togglePlacaOutro() {
+  const sel = document.getElementById('af-placa');
+  document.getElementById('af-placa-outro').style.display = sel.value==='outra'?'block':'none';
+}
+function selectCombustivel(tipo) {
+  combustivelSelecionado = tipo;
+  document.getElementById('af-combustivel').value = tipo;
+  document.getElementById('btn-diesel').className='combo-btn'+(tipo==='DIESEL'?' selected':'');
+  document.getElementById('btn-arla').className='combo-btn'+(tipo==='ARLA'?' selected-arla':'');
+}
+function previewFoto(input) {
+  // iOS Safari: verificar se há arquivo
+  if (!input.files || !input.files[0]) return;
+  const file = input.files[0];
+  // iOS às vezes não respeita accept="image/*" — verificar manualmente
+  if (!file.type.startsWith('image/') && file.type !== '') {
+    showToast('⚠️ Selecione uma imagem válida', true);
+    input.value = '';
+    return;
+  }
+  const r = new FileReader();
+  r.onload = function(e) {
+    const src = e.target.result;
+    const img = document.getElementById('foto-img');
+    const preview = document.getElementById('foto-preview');
+    img.src = src;
+    preview.style.display = 'block';
+  };
+  r.onerror = function() {
+    showToast('⚠️ Erro ao carregar imagem', true);
+  };
+  r.readAsDataURL(file);
+}
+function getPlaca() {
+  const v = document.getElementById('af-placa').value;
+  if(v==='outra') return document.getElementById('af-placa-outro').value.trim().toUpperCase();
+  return v;
+}
+function salvarRegistro() {
+  const placa     = getPlaca();
+  const km        = document.getElementById('af-km').value.trim();
+  const litragem  = document.getElementById('af-litragem').value.trim();
+  const combustivel = combustivelSelecionado;
+  const motorista = document.getElementById('af-motorista').value.trim();
+  const responsavel = document.getElementById('af-responsavel').value.trim();
+
+  // iOS Safari: verificar foto pelo FileReader result no img.src
+  const fotoImg = document.getElementById('foto-img');
+  const fotoSrc = fotoImg ? fotoImg.src : '';
+  // iOS às vezes retorna data: ou blob: URLs
+  const temFoto = fotoSrc && fotoSrc.length > 50 &&
+    (fotoSrc.startsWith('data:image') || fotoSrc.startsWith('blob:'));
+
+  if(!placa||!km||!litragem||!combustivel||!motorista||!responsavel){
+    showToast('⚠️ Preencha todos os campos obrigatórios',true); return;
+  }
+  if(!horaInicio||!horaFim){
+    showToast('⚠️ Marque Início e Fim da operação!',true); return;
+  }
+  if(!temFoto){
+    showToast('⚠️ A foto da bomba é obrigatória!',true); return;
+  }
+
+  // iOS Safe: usar funções de data compatíveis
+  function formatHHMM(d) {
+    const h = String(d.getHours()).padStart(2,'0');
+    const m = String(d.getMinutes()).padStart(2,'0');
+    return h + ':' + m;
+  }
+  function formatDataBR(d) {
+    const dia = String(d.getDate()).padStart(2,'0');
+    const mes = String(d.getMonth()+1).padStart(2,'0');
+    const ano = d.getFullYear();
+    return dia+'/'+mes+'/'+ano;
+  }
+  function formatDateTimeBR(d) {
+    const h = String(d.getHours()).padStart(2,'0');
+    const m = String(d.getMinutes()).padStart(2,'0');
+    const s = String(d.getSeconds()).padStart(2,'0');
+    return formatDataBR(d)+' '+h+':'+m+':'+s;
+  }
+
+  const hI  = formatHHMM(horaInicio);
+  const hF  = formatHHMM(horaFim);
+  const ms  = horaFim - horaInicio;
+  const min = Math.floor(ms/60000), h=Math.floor(min/60), m=min%60;
+  const dur = h>0?`${h}h ${m}min`:`${min}min`;
+  const duracaoMin = min;
+  const agora = new Date();
+
+  const reg = {
+    id: Date.now(),
+    placa, km: parseFloat(km), litragem: parseFloat(litragem),
+    combustivel, motorista, responsavel,
+    horaInicio: hI, horaFim: hF, duracao: dur, duracaoMin,
+    foto: fotoSrc,
+    horario: formatDateTimeBR(agora),
+    data: formatDataBR(agora),
+    timestamp: agora.getTime()
+  };
+
+  registros.unshift(reg);
+  localStorage.setItem('abastecimentos', JSON.stringify(registros));
+
+  // Sync Firebase
+  fbSalvarRegistro(reg);
+
+  // Descontar do tanque
+  if(combustivel==='DIESEL'){
+    tanqueCfg.atual = Math.max(0, (tanqueCfg.atual||0) - parseFloat(litragem));
+    localStorage.setItem('tanqueCfg', JSON.stringify(tanqueCfg));
+    document.getElementById('tank-capacidade').value = tanqueCfg.capacidade;
+    document.getElementById('tank-atual').value = tanqueCfg.atual;
+  }
+
+  atualizarBadge();
+  resetForm();
+  showToast('✅ Abastecimento registrado!');
+}
+function resetForm() {
+  document.getElementById('af-placa').selectedIndex=0;
+  document.getElementById('af-placa-outro').style.display='none';
+  ['af-km','af-litragem','af-motorista','af-responsavel'].forEach(id=>document.getElementById(id).value='');
+  // iOS Safari: limpar input file corretamente
+  try {
+    document.getElementById('af-foto').value='';
+  } catch(e) {
+    // iOS antigo: substituir o elemento
+    const old = document.getElementById('af-foto');
+    const novo = old.cloneNode(true);
+    novo.value = '';
+    novo.addEventListener('change', function(){ previewFoto(this); });
+    old.parentNode.replaceChild(novo, old);
+  }
+  document.getElementById('foto-preview').style.display='none';
+  document.getElementById('foto-img').removeAttribute('src');
+  combustivelSelecionado='';
+  document.getElementById('btn-diesel').className='combo-btn';
+  document.getElementById('btn-arla').className='combo-btn';
+  document.getElementById('af-combustivel').value='';
+  horaInicio=null; horaFim=null;
+  ['inicio','fim'].forEach(t=>{
+    document.getElementById('val-'+t).textContent='--:--';
+    document.getElementById('val-'+t).classList.add('vazio');
+    document.getElementById('btn-'+t).classList.remove('marcado');
+    document.getElementById('btn-'+t).textContent=t==='inicio'?'⏱ Marcar Início':'⏱ Marcar Fim';
+    document.getElementById('box-'+t).classList.remove('ativa');
+  });
+  document.getElementById('field-duracao').style.display='none';
+  document.getElementById('val-duracao').textContent='--';
+}
+
+// ══════════════════════════════════════════════
+// BADGE
+// ══════════════════════════════════════════════
+function atualizarBadge() {
+  const b = document.getElementById('badge');
+  b.style.display = registros.length>0?'inline':'none';
+  b.textContent = registros.length;
+}
+
+// ══════════════════════════════════════════════
+// TOAST
+// ══════════════════════════════════════════════
+function showToast(msg='✅ Salvo!', erro=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast'+(erro?' erro':'');
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),3000);
+}
+
+// ══════════════════════════════════════════════
+// REGISTROS
+// ══════════════════════════════════════════════
+function renderRegistros() {
+  const lista = document.getElementById('lista-registros');
+  if(!registros.length){
+    lista.innerHTML=`<div class="empty-state"><div class="icon">⛽</div><p>Nenhum abastecimento registrado.</p></div>`;return;
+  }
+  lista.innerHTML = registros.map(r=>`
+    <div class="registro-card">
+      <div class="card-top">
+        <span class="card-placa">🚛 ${r.placa}</span>
+        <span class="card-time">${r.horario}</span>
+      </div>
+      <div class="card-chips">
+        <span class="chip ${r.combustivel==='DIESEL'?'diesel':'arla'}">${r.combustivel==='DIESEL'?'🟡':'🔵'} ${r.combustivel}</span>
+        <span class="chip">🪣 ${r.litragem.toLocaleString('pt-BR')} L</span>
+        <span class="chip km">📍 ${r.km.toLocaleString('pt-BR')} km</span>
+        ${r.horaInicio?`<span class="chip tempo">🟢 ${r.horaInicio} → 🔴 ${r.horaFim}</span>`:''}
+        ${r.duracao?`<span class="chip tempo">⏳ ${r.duracao}</span>`:''}
+      </div>
+      <div class="card-info">
+        <strong>Motorista:</strong> ${r.motorista} &nbsp;|&nbsp; <strong>Responsável:</strong> ${r.responsavel}
+      </div>
+      ${r.foto?`<div class="card-foto"><img src="${r.foto}" alt="Foto da bomba"></div>`:''}
+    </div>
+  `).join('');
+}
+function limparRegistros() {
+  if(!senhaDesbloqueada) {
+    document.getElementById('senha-overlay').style.display = 'flex';
+    document.getElementById('senha-input').value = '';
+    document.getElementById('senha-errou').style.display = 'none';
+    document.getElementById('senha-overlay').dataset.destino = '__limpar__';
+    document.getElementById('senha-input').focus();
+    return;
+  }
+  _executarLimpar();
+}
+function _executarLimpar() {
+  if(!confirm('Apagar todos os registros do Firebase? Essa ação não pode ser desfeita.')) return;
+  registros=[];
+  localStorage.removeItem('abastecimentos');
+  atualizarBadge();
+  renderRegistros();
+  // Limpar no Firebase também
+  if(window._fb && window._fb.limparTodos) window._fb.limparTodos();
+}
+
+// ══════════════════════════════════════════════
+// DASHBOARD
+// ══════════════════════════════════════════════
+const CORES = ['#f59e0b','#3b82f6','#10b981','#a78bfa','#f97316','#06b6d4','#ef4444','#ec4899','#84cc16','#14b8a6','#8b5cf6','#fb923c'];
+
+function calcDash() {
+  const agora = Date.now();
+  const semana = 7*24*60*60*1000, mes = 30*24*60*60*1000;
+  let totalL=0, semanal=0, mensal=0, duracaoTotal=0, duracaoCount=0;
+  const porVeiculo={};
+
+  registros.forEach(r=>{
+    totalL += r.litragem||0;
+    if(agora-r.timestamp<=semana) semanal+=r.litragem||0;
+    if(agora-r.timestamp<=mes) mensal+=r.litragem||0;
+    if(r.duracaoMin!=null){duracaoTotal+=r.duracaoMin;duracaoCount++}
+    if(!porVeiculo[r.placa]) porVeiculo[r.placa]={total:0,semanal:0,mensal:0,count:0,totalMin:0};
+    porVeiculo[r.placa].total+=r.litragem||0;
+    porVeiculo[r.placa].count++;
+    if(r.duracaoMin!=null) porVeiculo[r.placa].totalMin+=r.duracaoMin;
+    if(agora-r.timestamp<=semana) porVeiculo[r.placa].semanal+=r.litragem||0;
+    if(agora-r.timestamp<=mes)   porVeiculo[r.placa].mensal+=r.litragem||0;
+  });
+  return {totalL,semanal,mensal,porVeiculo,duracaoMedia:duracaoCount?duracaoTotal/duracaoCount:0};
+}
+
+function renderDashboard() {
+  if(!registros.length){
+    document.getElementById('kpi-total-l').textContent='0 L';
+    document.getElementById('kpi-veiculos').textContent='0';
+    document.getElementById('kpi-qtd').textContent='0';
+    document.getElementById('kpi-semanal').textContent='0 L';
+    document.getElementById('kpi-mensal').textContent='0 L';
+    document.getElementById('kpi-tempo-medio').textContent='--';
+    document.getElementById('kpi-maior').textContent='--';
+    document.getElementById('kpi-maior-sub').textContent='--';
+    document.getElementById('ranking-consumo').innerHTML='<div style="color:var(--muted);font-size:13px;padding:10px">Sem dados</div>';
+    document.getElementById('ranking-tempo').innerHTML='<div style="color:var(--muted);font-size:13px;padding:10px">Sem dados</div>';
+    return;
+  }
+
+  const d = calcDash();
+  const veiculos = Object.keys(d.porVeiculo);
+  const maior = veiculos.sort((a,b)=>d.porVeiculo[b].total-d.porVeiculo[a].total)[0];
+
+  // KPIs
+  document.getElementById('kpi-total-l').textContent = d.totalL.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L';
+  document.getElementById('kpi-veiculos').textContent = veiculos.length;
+  document.getElementById('kpi-qtd').textContent = registros.length;
+  document.getElementById('kpi-semanal').textContent = d.semanal.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L';
+  document.getElementById('kpi-mensal').textContent = d.mensal.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L';
+  const dm = d.duracaoMedia, dh=Math.floor(dm/60), dmm=Math.round(dm%60);
+  document.getElementById('kpi-tempo-medio').textContent = dm>0?(dh>0?`${dh}h ${dmm}min`:`${Math.round(dm)}min`):'--';
+  document.getElementById('kpi-maior').textContent = maior||'--';
+  document.getElementById('kpi-maior-sub').textContent = maior?d.porVeiculo[maior].total.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L total':'--';
+
+  // Tanque no KPI
+  const tpct = tanqueCfg.capacidade>0?Math.round(tanqueCfg.atual/tanqueCfg.capacidade*100):0;
+  document.getElementById('kpi-tanque-pct').textContent = tanqueCfg.capacidade>0?tpct+'%':'--';
+  document.getElementById('kpi-tanque-pct').className='kpi-value '+(tpct<=20?'red':tpct<=50?'fuel':'green');
+  document.getElementById('kpi-tanque-l').textContent = tanqueCfg.capacidade>0?tanqueCfg.atual.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L restantes':'Configure o tanque';
+
+  // Rankings
+  const sortedConsumo = [...veiculos].sort((a,b)=>d.porVeiculo[b].total-d.porVeiculo[a].total).slice(0,5);
+  const maxC = d.porVeiculo[sortedConsumo[0]]?.total||1;
+  const posLabel=['gold','silver','bronze'];
+  document.getElementById('ranking-consumo').innerHTML = sortedConsumo.map((pl,i)=>{
+    const v=d.porVeiculo[pl]; const pct=Math.round(v.total/maxC*100);
+    return `<div class="rank-row">
+      <span class="rank-pos ${posLabel[i]||''}">${i+1}</span>
+      <div style="flex:1">
+        <div style="display:flex;justify-content:space-between"><span class="rank-placa">${pl}</span><span class="rank-val">${v.total.toLocaleString('pt-BR',{maximumFractionDigits:0})} L</span></div>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width:${pct}%"></div></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const sortedTempo = [...veiculos].filter(p=>d.porVeiculo[p].count>0)
+    .sort((a,b)=>(d.porVeiculo[b].totalMin/d.porVeiculo[b].count)-(d.porVeiculo[a].totalMin/d.porVeiculo[a].count)).slice(0,5);
+  const maxT = (d.porVeiculo[sortedTempo[0]]?.totalMin||0)/(d.porVeiculo[sortedTempo[0]]?.count||1)||1;
+  document.getElementById('ranking-tempo').innerHTML = sortedTempo.map((pl,i)=>{
+    const v=d.porVeiculo[pl]; const avg=v.count>0?v.totalMin/v.count:0; const pct=Math.round(avg/maxT*100);
+    const ah=Math.floor(avg/60),am=Math.round(avg%60);
+    const txt=ah>0?`${ah}h ${am}min`:`${Math.round(avg)}min`;
+    return `<div class="rank-row">
+      <span class="rank-pos ${posLabel[i]||''}">${i+1}</span>
+      <div style="flex:1">
+        <div style="display:flex;justify-content:space-between"><span class="rank-placa">${pl}</span><span class="rank-val">${txt}/op</span></div>
+        <div class="rank-bar-wrap"><div class="rank-bar" style="width:${pct}%;background:var(--purple)"></div></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Charts — estilo linha suave laranja + gradiente
+  const labels = [...veiculos].sort((a,b)=>d.porVeiculo[b].total-d.porVeiculo[a].total);
+
+  renderLineChart('chart-veiculos', labels, labels.map(p=>d.porVeiculo[p].total), '#f59e0b', 'Total (L)');
+  renderLineChart('chart-semanal',  labels, labels.map(p=>d.porVeiculo[p].semanal), '#3b82f6', 'Semanal (L)');
+  renderLineChart('chart-mensal',   labels, labels.map(p=>d.porVeiculo[p].mensal),  '#10b981', 'Mensal (L)');
+
+  // Linha temporal por data
+  const porData={};
+  registros.forEach(r=>{if(!porData[r.data])porData[r.data]=0;porData[r.data]+=r.litragem||0});
+  const datas = Object.keys(porData).sort((a,b)=>new Date(a.split('/').reverse().join('-'))-new Date(b.split('/').reverse().join('-')));
+  renderLineChart('chart-linha', datas, datas.map(dt=>porData[dt]), '#f59e0b', 'Litros abastecidos');
+}
+
+function renderLineChart(id, labels, data, cor, label) {
+  const canvas = document.getElementById(id);
+  if(canvas._chart) canvas._chart.destroy();
+
+  // Gradiente sob a linha
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.parentElement.offsetHeight || 220);
+  grad.addColorStop(0,   cor + '55');
+  grad.addColorStop(0.6, cor + '18');
+  grad.addColorStop(1,   cor + '00');
+
+  canvas._chart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label,
+        data,
+        borderColor: cor,
+        borderWidth: 2.5,
+        backgroundColor: grad,
+        fill: true,
+        tension: 0.42,
+        pointBackgroundColor: cor,
+        pointBorderColor: '#1a1d27',
+        pointBorderWidth: 2,
+        pointRadius: 5,
+        pointHoverRadius: 7,
+        pointHoverBackgroundColor: '#fff',
+        pointHoverBorderColor: cor,
+        pointHoverBorderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a1d27',
+          borderColor: cor,
+          borderWidth: 1,
+          titleColor: '#e8eaf0',
+          bodyColor: cor,
+          padding: 10,
+          cornerRadius: 8,
+          callbacks: {
+            label: ctx => ` ${ctx.parsed.y.toLocaleString('pt-BR', {maximumFractionDigits:0})} L`
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#6b7280',
+            font: { size: 10, family: 'Barlow' },
+            maxRotation: 30,
+            maxTicksLimit: 10,
+          },
+          grid: { display: false },
+          border: { display: false },
+        },
+        y: {
+          ticks: {
+            color: '#6b7280',
+            font: { size: 10, family: 'Barlow' },
+            callback: v => v >= 1000 ? (v/1000).toFixed(1)+'k' : v,
+            maxTicksLimit: 5,
+          },
+          grid: {
+            color: '#2e335044',
+            drawBorder: false,
+          },
+          border: { display: false, dash: [4,4] },
+        }
+      }
+    }
+  });
+}
+
+// ══════════════════════════════════════════════
+// TANQUE
+// ══════════════════════════════════════════════
+function salvarTanqueConfig() {
+  const cap = parseFloat(document.getElementById('tank-capacidade').value)||0;
+  const atu = parseFloat(document.getElementById('tank-atual').value)||0;
+  tanqueCfg = {capacidade:cap, atual:Math.min(atu,cap)};
+  localStorage.setItem('tanqueCfg',JSON.stringify(tanqueCfg));
+  renderTanque();
+}
+
+function renderTanque() {
+  const {capacidade,atual} = tanqueCfg;
+  document.getElementById('tank-capacidade').value = capacidade||'';
+  document.getElementById('tank-atual').value = atual||'';
+
+  // Visual
+  const pct = capacidade>0?Math.min(100,Math.round(atual/capacidade*100)):0;
+  const fill = document.getElementById('tank-fill');
+  fill.style.height = pct+'%';
+  fill.className = 'tank-fill '+(pct<=20?'baixo':pct<=60?'medio':'alto');
+  document.getElementById('tank-pct-txt').textContent = pct+'%';
+  document.getElementById('tank-label-l').textContent = capacidade>0?`${atual.toLocaleString('pt-BR',{maximumFractionDigits:0})} L de ${capacidade.toLocaleString('pt-BR',{maximumFractionDigits:0})} L`:'Configure a capacidade do tanque';
+
+  // Alerta
+  const alert = document.getElementById('tanque-alert');
+  if(capacidade>0&&pct<=20){
+    alert.style.display='flex';
+    document.getElementById('tanque-alert-txt').textContent=`⚠️ Nível crítico: apenas ${pct}% (${atual.toLocaleString('pt-BR',{maximumFractionDigits:0})} L). Recomenda-se reabastecimento urgente!`;
+  } else {
+    alert.style.display='none';
+  }
+
+  // Stats
+  const consumido = registros.filter(r=>r.combustivel==='DIESEL').reduce((s,r)=>s+(r.litragem||0),0);
+  document.getElementById('ts-capacidade').textContent = capacidade>0?capacidade.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L':'--';
+  document.getElementById('ts-atual').textContent = capacidade>0?atual.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L':'--';
+  document.getElementById('ts-consumido').textContent = consumido.toLocaleString('pt-BR',{maximumFractionDigits:0})+' L';
+  document.getElementById('ts-abastecimentos').textContent = registros.filter(r=>r.combustivel==='DIESEL').length;
+
+  // Histórico saídas
+  const hist = document.getElementById('tank-hist-list');
+  const diesel = registros.filter(r=>r.combustivel==='DIESEL').slice(0,10);
+  if(!diesel.length){hist.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px">Nenhum abastecimento de Diesel registrado.</div>';return}
+  hist.innerHTML = diesel.map(r=>`
+    <div class="tank-hist-row">
+      <span class="pl">🚛 ${r.placa}</span>
+      <span class="lt">-${r.litragem.toLocaleString('pt-BR',{maximumFractionDigits:0})} L</span>
+      <span class="dt">${r.data} ${r.horaInicio||''}</span>
+    </div>`).join('');
+}
+
+// ══════════════════════════════════════════════
+// FIREBASE — Realtime Database (SDK v10)
+// ══════════════════════════════════════════════
+
+function fbLog(msg, tipo='info'){
+  const log = document.getElementById('fb-log');
+  if(!log) return;
+  const line = document.createElement('div');
+  line.className = 'fb-log-line ' + tipo;
+  line.textContent = '[' + new Date().toLocaleTimeString('pt-BR') + '] ' + msg;
+  log.insertBefore(line, log.firstChild);
+  while(log.children.length > 50) log.removeChild(log.lastChild);
+}
+
+function setFbStatus(s){
+  const dot = document.getElementById('fb-dot');
+  const txt = document.getElementById('fb-status-txt');
+  if(!dot||!txt) return;
+  if(s==='online'){ dot.className='fb-dot online'; txt.textContent='Conectado ao Realtime Database ✅'; }
+  else if(s==='erro'){ dot.className='fb-dot erro'; txt.textContent='Erro de conexão ❌'; }
+  else { dot.className='fb-dot'; txt.textContent='Verificando...'; }
+
+  // Atualizar indicador no header
+  const syncDot = document.getElementById('sync-dot');
+  const syncTxt = document.getElementById('sync-txt');
+  if(syncDot && syncTxt) {
+    if(s==='online'){
+      syncDot.style.background='var(--green)';
+      syncDot.style.animation='none';
+      syncTxt.textContent='Sincronizado ✓';
+    } else if(s==='erro') {
+      syncDot.style.background='var(--red)';
+      syncDot.style.animation='none';
+      syncTxt.textContent='Sem conexão';
+    } else {
+      syncDot.style.background='var(--muted)';
+      syncDot.style.animation='pulse 1.2s infinite';
+      syncTxt.textContent='Sincronizando...';
+    }
+  }
+}
+
+function carregarConfigFirebase(){
+  // Credenciais são fixas no SDK — apenas mostra o status
+  const track = document.getElementById('toggle-track');
+  if(track) track.className = 'toggle-track on';
+  fbLog('🔥 Firebase Realtime Database configurado e ativo.', 'ok');
+}
+
+// Salvar UM registro no Realtime DB (chamado automaticamente ao registrar)
+async function fbSalvarRegistro(reg){
+  if(!window._fb){ fbLog('SDK ainda carregando...','info'); return; }
+  await window._fb.salvar(reg);
+}
+
+async function testarConexaoFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  await window._fb.testar();
+}
+
+async function enviarParaFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  if(!registros.length){ fbLog('Nenhum registro local para enviar.','info'); return; }
+  await window._fb.enviarTodos(registros);
+}
+
+async function importarDoFirebase(){
+  if(!window._fb){ fbLog('SDK ainda carregando, aguarde...','err'); return; }
+  await window._fb.importar();
+}
+
+// Toggle e salvarConfigFirebase mantidos por compatibilidade visual
+let autoSync = true;
+function toggleAutoSync(){ /* sync sempre ativo no Realtime DB */ }
+function salvarConfigFirebase(){ fbLog('Credenciais fixas no SDK — não é necessário salvar.','info'); }
+
+// ══════════════════════════════════════════════
+// EXPORTAR CSV
+// ══════════════════════════════════════════════
+let _csvAtual = '', _csvNome = '';
+
+function maskDate(el){
+  let v = el.value.replace(/\D/g,'');
+  if(v.length>2) v=v.slice(0,2)+'/'+v.slice(2);
+  if(v.length>5) v=v.slice(0,5)+'/'+v.slice(5,9);
+  el.value=v;
+}
+
+function filtrarRegistrosExport(){
+  const ini = document.getElementById('exp-inicio').value.trim();
+  const fim = document.getElementById('exp-fim').value.trim();
+  const placa = document.getElementById('exp-placa').value;
+  const comb  = document.getElementById('exp-combustivel').value;
+
+  function parseDate(s){
+    if(!s||s.length<8) return null;
+    const [d,m,a]=s.split('/');
+    return new Date(`${a}-${m}-${d}T00:00:00`);
+  }
+  const dtIni = parseDate(ini), dtFim = parseDate(fim);
+  if(dtFim) dtFim.setHours(23,59,59);
+
+  return registros.filter(r=>{
+    const ts = new Date(r.timestamp);
+    if(dtIni && ts < dtIni) return false;
+    if(dtFim && ts > dtFim) return false;
+    if(placa && r.placa !== placa) return false;
+    if(comb  && r.combustivel !== comb) return false;
+    return true;
+  });
+}
+
+function csvEscape(v){
+  const s = String(v??'');
+  if(s.includes(',')||s.includes('"')||s.includes('\n')) return '"'+s.replace(/"/g,'""')+'"';
+  return s;
+}
+function csvRow(arr){ return arr.map(csvEscape).join(';'); }
+
+function exportarCSV(tipo){
+  const regs = filtrarRegistrosExport();
+  if(!regs.length){ showToast('⚠️ Nenhum registro no filtro selecionado',true); return; }
+
+  let linhas=[], nome='';
+
+  if(tipo==='completo'){
+    nome='abastecimentos_completo';
+    linhas.push(csvRow(['ID','Data','Horário','Placa','Combustível','Litros','KM','Motorista','Responsável','Hora Início','Hora Fim','Duração','Duração (min)']));
+    regs.forEach(r=>linhas.push(csvRow([r.id,r.data,r.horario,r.placa,r.combustivel,r.litragem,r.km,r.motorista,r.responsavel,r.horaInicio||'',r.horaFim||'',r.duracao||'',r.duracaoMin||''])));
+  }
+  else if(tipo==='consumo'){
+    nome='consumo_por_veiculo';
+    const map={};
+    regs.forEach(r=>{
+      if(!map[r.placa]) map[r.placa]={placa:r.placa,total:0,qtd:0,totalMin:0,maior:0};
+      map[r.placa].total+=r.litragem||0;
+      map[r.placa].qtd++;
+      map[r.placa].totalMin+=r.duracaoMin||0;
+      if((r.litragem||0)>map[r.placa].maior) map[r.placa].maior=r.litragem;
+    });
+    linhas.push(csvRow(['Placa','Total Litros','Qtd. Abastec.','Média por Op. (L)','Maior Abastec. (L)','Tempo Médio (min)']));
+    Object.values(map).sort((a,b)=>b.total-a.total).forEach(v=>{
+      linhas.push(csvRow([v.placa,v.total.toFixed(1),v.qtd,(v.total/v.qtd).toFixed(1),v.maior.toFixed(1),(v.totalMin/v.qtd).toFixed(1)]));
+    });
+  }
+  else if(tipo==='diario'){
+    nome='consumo_diario';
+    const map={};
+    regs.forEach(r=>{
+      const d=r.data||'';
+      if(!map[d]) map[d]={data:d,total:0,qtd:0,veiculos:new Set(),ts:r.timestamp};
+      map[d].total+=r.litragem||0;
+      map[d].qtd++;
+      map[d].veiculos.add(r.placa);
+    });
+    linhas.push(csvRow(['Data','Total Litros','Qtd. Abastec.','Veículos Atendidos']));
+    Object.values(map).sort((a,b)=>a.ts-b.ts).forEach(v=>{
+      linhas.push(csvRow([v.data,v.total.toFixed(1),v.qtd,[...v.veiculos].join(' | ')]));
+    });
+  }
+  else if(tipo==='motorista'){
+    nome='por_motorista';
+    const map={};
+    regs.forEach(r=>{
+      const m=r.motorista||'(sem nome)';
+      if(!map[m]) map[m]={motorista:m,total:0,qtd:0,veiculos:new Set(),totalMin:0};
+      map[m].total+=r.litragem||0;
+      map[m].qtd++;
+      map[m].veiculos.add(r.placa);
+      map[m].totalMin+=r.duracaoMin||0;
+    });
+    linhas.push(csvRow(['Motorista','Total Litros','Qtd. Abastec.','Veículos','Tempo Médio (min)']));
+    Object.values(map).sort((a,b)=>b.total-a.total).forEach(v=>{
+      linhas.push(csvRow([v.motorista,v.total.toFixed(1),v.qtd,[...v.veiculos].join(' | '),(v.totalMin/v.qtd).toFixed(1)]));
+    });
+  }
+  else if(tipo==='tempo'){
+    nome='tempos_operacao';
+    linhas.push(csvRow(['Placa','Data','Hora Início','Hora Fim','Duração (min)','Combustível','Litros','Responsável']));
+    regs.filter(r=>r.horaInicio).sort((a,b)=>a.timestamp-b.timestamp).forEach(r=>{
+      linhas.push(csvRow([r.placa,r.data,r.horaInicio,r.horaFim||'',r.duracaoMin||'',r.combustivel,r.litragem,r.responsavel]));
+    });
+  }
+  else if(tipo==='arla'){
+    nome='consumo_arla32';
+    const arla=regs.filter(r=>r.combustivel==='ARLA');
+    if(!arla.length){showToast('⚠️ Nenhum registro de Arla no filtro',true);return;}
+    linhas.push(csvRow(['Data','Placa','Litros','KM','Motorista','Responsável','Hora Início','Duração (min)']));
+    arla.forEach(r=>linhas.push(csvRow([r.data,r.placa,r.litragem,r.km,r.motorista,r.responsavel,r.horaInicio||'',r.duracaoMin||''])));
+  }
+
+  const csv = '\uFEFF'+linhas.join('\n'); // BOM para Excel
+  _csvAtual = csv;
+  _csvNome  = nome+'_'+new Date().toLocaleDateString('pt-BR').replace(/\//g,'-')+'.csv';
+
+  // Pré-visualização (primeiras 8 linhas)
+  const prev = linhas.slice(0,8).join('\n')+(linhas.length>8?'\n...(+'+(linhas.length-8)+' linhas)':'');
+  document.getElementById('exp-preview-txt').textContent = prev;
+  document.getElementById('exp-preview').style.display = 'block';
+  document.getElementById('exp-download-btn').textContent = `⬇ Baixar ${_csvNome}`;
+  document.getElementById('exp-preview').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function downloadCSVAtual(){
+  if(!_csvAtual) return;
+  // iOS Safari: createObjectURL + click em <a> pode não funcionar
+  // Usar tentativa com fallback para abrir em nova aba
+  try {
+    const blob = new Blob([_csvAtual],{type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = _csvNome;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); document.body.removeChild(a); }, 1000);
+    showToast('📥 Download iniciado!');
+  } catch(e) {
+    // Fallback iOS: abrir como data URI em nova aba
+    try {
+      const dataUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(_csvAtual);
+      window.open(dataUri, '_blank');
+      showToast('📥 Aberto em nova aba — salve o arquivo');
+    } catch(e2) {
+      showToast('⚠️ Erro ao baixar no iOS. Tente compartilhar.', true);
+    }
+  }
+}
+
+// Popular select de placas na aba exportar
+function popularSelectPlacas(){
+  const sel = document.getElementById('exp-placa');
+  if(!sel) return;
+  const placas = [...new Set(registros.map(r=>r.placa))].sort();
+  sel.innerHTML = '<option value="">Todas as placas</option>' +
+    placas.map(p=>`<option>${p}</option>`).join('');
+}
+
+// ══════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════
+// ══════════════════════════════════════════════
+// SIDEBAR
+// ══════════════════════════════════════════════
+function toggleSidebar() {
+  const s = document.getElementById('sidebar');
+  const o = document.getElementById('sidebar-overlay');
+  const h = document.getElementById('hamburger');
+  const isOpen = s.classList.contains('open');
+  if(isOpen) { s.classList.remove('open'); o.classList.remove('open'); h.classList.remove('open'); }
+  else        { s.classList.add('open');    o.classList.add('open');    h.classList.add('open'); }
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('open');
+  document.getElementById('hamburger').classList.remove('open');
+}
+
+// Seed removido — dados vêm exclusivamente do Firebase em tempo real
+
+atualizarBadge();
+// Preenche config do tanque nos inputs ao carregar
+document.getElementById('tank-capacidade').value = tanqueCfg.capacidade||'';
+document.getElementById('tank-atual').value = tanqueCfg.atual||'';
+
+// ══════════════════════════════════════════════
+// iOS SAFARI FIXES
+// ══════════════════════════════════════════════
+(function() {
+  // Fix 1: iOS Safari precisa de touchstart em elementos clicáveis para ativar :hover e click corretamente
+  // Adiciona listener vazio para "ativar" os elementos
+  document.addEventListener('touchstart', function(){}, {passive: true});
+
+  // Fix 2: Detectar iOS e ajustar comportamento do input file
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  if (isIOS) {
+    // No iOS, o evento change do file input só dispara quando o usuário confirma
+    // Garantir que o listener está correto
+    const fotoInput = document.getElementById('af-foto');
+    if (fotoInput) {
+      fotoInput.addEventListener('change', function() {
+        previewFoto(this);
+      });
+    }
+
+    // Fix 3: Senha input no iOS — usar touchend para garantir foco
+    const senhaInput = document.getElementById('senha-input');
+    if (senhaInput) {
+      senhaInput.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        this.focus();
+      });
+    }
+
+    // Fix 4: Botão registrar no iOS — adicionar touchend além de onclick
+    const btnSubmit = document.querySelector('.btn-submit');
+    if (btnSubmit) {
+      btnSubmit.addEventListener('touchend', function(e) {
+        // Deixa o onclick padrão funcionar; o touchend é só para garantir responsividade visual
+        this.style.transform = 'scale(0.98)';
+        setTimeout(() => { this.style.transform = ''; }, 150);
+      });
+    }
+
+    // Fix 5: Prevenir zoom duplo-toque em inputs numéricos
+    document.querySelectorAll('input[type="number"]').forEach(function(el) {
+      el.style.fontSize = '16px'; // iOS não faz zoom em inputs com font-size >= 16px
+    });
+    document.querySelectorAll('input[type="text"], input[type="password"], select').forEach(function(el) {
+      el.style.fontSize = '16px';
+    });
+  }
+})();
+</script>
+</body>
+</html>
